@@ -1,23 +1,12 @@
 # MCP Swift SDK
 
-A Swift implementation of the Model Context Protocol (MCP) client. This SDK provides a modern, Swift-native way to interact with MCP servers.
-
-## Features
-
-- Full async/await support
-- Type-safe API
-- Resource management
-- Tool integration
-- Configurable transport layer
-- Swift concurrency with actor-based design
+Swift implementation of the [Model Context Protocol][mcp] (MCP).
 
 ## Requirements
 
-- Swift 5.7+
-- macOS 12.0+
-- iOS 15.0+
-- tvOS 15.0+
-- watchOS 8.0+
+- Swift 6.0+ / Xcode 16+
+- macOS 14.0+ (Sonoma)
+- iOS 17.0+
 
 ## Installation
 
@@ -27,45 +16,65 @@ Add the following to your `Package.swift` file:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/yourusername/mcp-swift-sdk.git", from: "1.0.0")
+    .package(url: "https://github.com/loopwork-ai/mcp-swift-sdk.git", from: "0.1.0")
 ]
 ```
 
 ## Usage
 
-### Basic Setup
+### Basic Client Setup
 
 ```swift
 import MCP
 
-// Create a transport (e.g., StdioTransport)
-let transport = StdioTransport(command: "/path/to/server")
-
-// Create client info
-let clientInfo = Implementation(name: "MyApp", version: "1.0.0")
-
 // Initialize the client
-let client = MCPClient(transport: transport, clientInfo: clientInfo)
+let client = Client(name: "MyApp", version: "1.0.0")
 
-// Connect and initialize
-try await client.connect()
+// Create a transport and connect
+let transport = StdioTransport()
+try await client.connect(transport: transport)
+
+// Initialize the connection
 let result = try await client.initialize()
 ```
 
-### Working with Resources
+### Basic Server Setup
 
 ```swift
-// List available resources
-let resources = try await client.listResources()
+import MCP
 
-// Read a resource
-let resource = try await client.readResource("resource://example")
+// Initialize the server with capabilities
+let server = Server(
+    name: "MyServer", 
+    version: "1.0.0",
+    capabilities: .init(
+        resources: .init(
+            list: true,
+            read: true,
+            subscribe: true
+        )
+    )
+)
 
-// Subscribe to resource updates
-try await client.subscribeResource("resource://example")
+// Create transport and start server
+let transport = StdioTransport()
+try await server.start(transport: transport)
 
-// Unsubscribe from resource updates
-try await client.unsubscribeResource("resource://example")
+// Register method handlers
+server.withMethodHandler(ReadResource.self) { params in
+    // Handle resource read request
+    let uri = params.uri
+    let content = [Resource.Content.text("Example content")]
+    return .init(contents: content)
+}
+
+// Register notification handlers
+server.onNotification(ResourceUpdatedNotification.self) { message in
+    // Handle resource update notification
+}
+
+// Stop the server when done
+await server.stop()
 ```
 
 ### Working with Tools
@@ -75,41 +84,57 @@ try await client.unsubscribeResource("resource://example")
 let tools = try await client.listTools()
 
 // Call a tool
-let result = try await client.callTool(name: "example-tool", arguments: ["key": "value"])
-```
+let (content, isError) = try await client.callTool(
+    name: "example-tool", 
+    arguments: ["key": "value"]
+)
 
-### Custom Transport
-
-You can create your own transport by implementing the `MCPTransport` protocol:
-
-```swift
-public protocol MCPTransport {
-    func connect() async throws
-    func disconnect() async
-    func sendRequest(_ data: Data) async throws -> Data
-    func sendNotification(_ data: Data) async throws
+// Handle tool content
+for item in content {
+    switch item {
+    case .text(let text):
+        print(text)
+    case .image(let data, let mimeType, let metadata):
+        // Handle image data
+    }
 }
 ```
 
-## Error Handling
-
-The SDK uses the `MCPError` type for error handling:
+### Working with Resources
 
 ```swift
-public enum MCPError: LocalizedError {
-    case connectionClosed
-    case invalidResponse
-    case invalidParams(String)
-    case serverError(String)
-    case protocolError(String)
-    case transportError(Error)
+// List available resources
+let (resources, nextCursor) = try await client.listResources()
+
+// Read a resource
+let contents = try await client.readResource(uri: "resource://example")
+
+// Subscribe to resource updates
+try await client.subscribeToResource(uri: "resource://example")
+
+// Handle resource updates
+await client.onNotification(ResourceUpdatedNotification.self) { message in
+    let uri = message.params.uri
+    let content = message.params.content
+    // Handle the update
 }
 ```
 
-## Contributing
+### Working with Prompts
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+```swift
+// List available prompts
+let (prompts, nextCursor) = try await client.listPrompts()
+
+// Get a prompt with arguments
+let (description, messages) = try await client.getPrompt(
+    name: "example-prompt",
+    arguments: ["key": "value"]
+)
+```
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details. 
+This project is licensed under the Apache License, Version 2.0.
+
+[mcp]: https://modelcontextprotocol.io
