@@ -16,7 +16,7 @@ Add the following to your `Package.swift` file:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/loopwork-ai/mcp-swift-sdk.git", from: "0.2.0")
+    .package(url: "https://github.com/loopwork-ai/mcp-swift-sdk.git", from: "0.3.0")
 ]
 ```
 
