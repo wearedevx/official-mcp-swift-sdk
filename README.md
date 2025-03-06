@@ -2,6 +2,9 @@
 
 Swift implementation of the [Model Context Protocol][mcp] (MCP).
 
+> [!TIP]
+> To see it in action, check out the [iMCP app](https://iMCP.app/?ref=mcp-swift-sdk).
+
 ## Requirements
 
 - Swift 6.0+ / Xcode 16+
