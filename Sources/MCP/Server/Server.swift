@@ -205,7 +205,8 @@ public actor Server {
                             "Error processing message", metadata: ["error": "\(error)"])
                         let response = AnyMethod.response(
                             id: requestID ?? .random,
-                            error: error as? Error ?? Error.internalError(error.localizedDescription)
+                            error: error as? Error
+                                ?? Error.internalError(error.localizedDescription)
                         )
                         try? await send(response)
                     }
@@ -260,7 +261,11 @@ public actor Server {
         guard let connection = connection else {
             throw Error.internalError("Server connection not initialized")
         }
-        let responseData = try JSONEncoder().encode(response)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+
+        let responseData = try encoder.encode(response)
+
         if let responseStr = String(data: responseData, encoding: .utf8) {
             try await connection.send(responseStr)
         }
@@ -271,7 +276,12 @@ public actor Server {
         guard let connection = connection else {
             throw Error.internalError("Server connection not initialized")
         }
-        let notificationData = try JSONEncoder().encode(notification)
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+
+        let notificationData = try encoder.encode(notification)
+
         if let notificationStr = String(data: notificationData, encoding: .utf8) {
             try await connection.send(notificationStr)
         }
