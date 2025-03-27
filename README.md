@@ -2,9 +2,6 @@
 
 Swift implementation of the [Model Context Protocol][mcp] (MCP).
 
-> [!TIP]
-> To see it in action, check out the [iMCP app](https://iMCP.app/?ref=mcp-swift-sdk).
-
 ## Requirements
 
 - Swift 6.0+ / Xcode 16+
@@ -19,7 +16,7 @@ Add the following to your `Package.swift` file:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/loopwork-ai/mcp-swift-sdk.git", from: "0.5.1")
+    .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.5.1")
 ]
 ```
 
