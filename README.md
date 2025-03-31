@@ -5,8 +5,11 @@ Swift implementation of the [Model Context Protocol][mcp] (MCP).
 ## Requirements
 
 - Swift 6.0+ / Xcode 16+
-- macOS 14.0+ (Sonoma)
-- iOS 17.0+
+- macOS 13.0+
+- iOS / Mac Catalyst 16.0+
+- watchOS 9.0+
+- tvOS 16.0+
+- visionOS 1.0+
 
 ## Installation
 
@@ -16,7 +19,7 @@ Add the following to your `Package.swift` file:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.5.1")
+    .package(url: "https://github.com/modelcontextprotocol/swift-sdk.git", from: "0.6.0")
 ]
 ```
 
