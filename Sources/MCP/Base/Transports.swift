@@ -1,8 +1,13 @@
 import Darwin
 import Logging
-import SystemPackage
 
 import struct Foundation.Data
+
+#if canImport(System)
+    import System
+#else
+    @preconcurrency import SystemPackage
+#endif
 
 /// Protocol defining the transport layer for MCP communication
 public protocol Transport: Actor {
@@ -107,7 +112,7 @@ public actor StdioTransport: Transport {
                         messageContinuation.yield(message)
                     }
                 }
-            } catch let error as Errno where error == .resourceTemporarilyUnavailable {
+            } catch let error where Error.isResourceTemporarilyUnavailable(error) {
                 try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms backoff
                 continue
             } catch {
@@ -147,7 +152,7 @@ public actor StdioTransport: Transport {
                 if written > 0 {
                     remaining = remaining.dropFirst(written)
                 }
-            } catch let error as Errno where error == .resourceTemporarilyUnavailable {
+            } catch let error where Error.isResourceTemporarilyUnavailable(error) {
                 try await Task.sleep(nanoseconds: 10_000_000)  // 10ms backoff
                 continue
             } catch {

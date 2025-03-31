@@ -1,5 +1,4 @@
 import Logging
-import SystemPackage
 
 import struct Foundation.Data
 import struct Foundation.Date
@@ -180,7 +179,7 @@ public actor Client {
                                 "Unexpected message received by client", metadata: metadata)
                         }
                     }
-                } catch let error as Errno where error == .resourceTemporarilyUnavailable {
+                } catch let error where Error.isResourceTemporarilyUnavailable(error) {
                     try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms
                     continue
                 } catch {

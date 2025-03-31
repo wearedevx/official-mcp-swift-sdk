@@ -1,5 +1,4 @@
 import Logging
-import SystemPackage
 
 import struct Foundation.Data
 import struct Foundation.Date
@@ -202,7 +201,7 @@ public actor Server {
                             }
                             throw Error.parseError("Invalid message format")
                         }
-                    } catch let error as Errno where error == .resourceTemporarilyUnavailable {
+                    } catch let error where Error.isResourceTemporarilyUnavailable(error) {
                         // Resource temporarily unavailable, retry after a short delay
                         try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms
                         continue
