@@ -6,8 +6,12 @@ import PackageDescription
 let package = Package(
     name: "mcp-swift-sdk",
     platforms: [
-        .macOS(.v14),
-        .iOS(.v17),
+        .macOS("13.0"),
+        .macCatalyst("16.0"),
+        .iOS("16.0"),
+        .watchOS("9.0"),
+        .tvOS("16.0"),
+        .visionOS("1.0"),
     ],
     products: [
         // Products define the executables and libraries a package produces, making them visible to other packages.
