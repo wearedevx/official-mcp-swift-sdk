@@ -172,15 +172,11 @@ public actor Server {
         task = Task {
             do {
                 let stream = await transport.receive()
-                for try await string in stream {
+                for try await data in stream {
                     if Task.isCancelled { break }  // Check cancellation inside loop
 
                     var requestID: ID?
                     do {
-                        guard let data = string.data(using: .utf8) else {
-                            throw Error.parseError("Invalid UTF-8 data")
-                        }
-
                         // Attempt to decode string data as AnyRequest or AnyMessage
                         let decoder = JSONDecoder()
                         if let request = try? decoder.decode(AnyRequest.self, from: data) {
@@ -203,7 +199,7 @@ public actor Server {
                         }
                     } catch let error where Error.isResourceTemporarilyUnavailable(error) {
                         // Resource temporarily unavailable, retry after a short delay
-                        try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms
+                        try? await Task.sleep(for: .milliseconds(10))
                         continue
                     } catch {
                         await logger?.error(
@@ -266,19 +262,17 @@ public actor Server {
 
     // MARK: - Sending
 
-    /// Send a response to a client
+    /// Send a response to a request
     public func send<M: Method>(_ response: Response<M>) async throws {
         guard let connection = connection else {
             throw Error.internalError("Server connection not initialized")
         }
+
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
 
         let responseData = try encoder.encode(response)
-
-        if let responseStr = String(data: responseData, encoding: .utf8) {
-            try await connection.send(responseStr)
-        }
+        try await connection.send(responseData)
     }
 
     /// Send a notification to connected clients
@@ -291,10 +285,7 @@ public actor Server {
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
 
         let notificationData = try encoder.encode(notification)
-
-        if let notificationStr = String(data: notificationData, encoding: .utf8) {
-            try await connection.send(notificationStr)
-        }
+        try await connection.send(notificationData)
     }
 
     // MARK: -
@@ -407,7 +398,7 @@ public actor Server {
 
             // Send initialized notification after a short delay
             Task {
-                try? await Task.sleep(nanoseconds: 100_000_000)  // 100ms
+                try? await Task.sleep(for: .milliseconds(10))
                 try? await self.notify(InitializedNotification.message())
             }
 

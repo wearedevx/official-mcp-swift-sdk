@@ -181,15 +181,10 @@ public actor Client {
 
                 do {
                     let stream = await connection.receive()
-                    for try await string in stream {
+                    for try await data in stream {
                         if Task.isCancelled { break }  // Check inside loop too
 
-                        // Decode and handle incoming message
-                        guard let data = string.data(using: .utf8) else {
-                            throw Error.parseError("Invalid UTF-8 data")
-                        }
-
-                        // Attempt to decode string data as AnyResponse or AnyMessage
+                        // Attempt to decode data as AnyResponse or AnyMessage
                         let decoder = JSONDecoder()
                         if let response = try? decoder.decode(AnyResponse.self, from: data),
                             let request = pendingRequests[response.id]
@@ -207,7 +202,7 @@ public actor Client {
                         }
                     }
                 } catch let error where Error.isResourceTemporarilyUnavailable(error) {
-                    try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms
+                    try? await Task.sleep(for: .milliseconds(10))
                     continue
                 } catch {
                     await logger?.error(
@@ -256,12 +251,9 @@ public actor Client {
         }
 
         let requestData = try JSONEncoder().encode(request)
-        guard let requestString = String(data: requestData, encoding: .utf8) else {
-            throw Error.internalError("Failed to encode request")
-        }
 
+        // Store the pending request first
         return try await withCheckedThrowingContinuation { continuation in
-            // Store the pending request first
             Task {
                 self.addPendingRequest(
                     id: request.id,
@@ -269,9 +261,9 @@ public actor Client {
                     type: M.Result.self
                 )
 
-                // Send the request
+                // Send the request data
                 do {
-                    try await connection.send(requestString)
+                    try await connection.send(requestData)
                 } catch {
                     continuation.resume(throwing: error)
                     self.removePendingRequest(id: request.id)

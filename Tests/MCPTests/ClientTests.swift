@@ -27,7 +27,7 @@ struct ClientTests {
 
         try await client.connect(transport: transport)
         // Small delay to ensure message loop is started
-        try await Task.sleep(nanoseconds: 10_000_000)  // 10ms
+        try await Task.sleep(for: .milliseconds(10))
 
         // Create a task for initialize that we'll cancel
         let initTask = Task {
@@ -35,19 +35,19 @@ struct ClientTests {
         }
 
         // Give it a moment to send the request
-        try await Task.sleep(nanoseconds: 10_000_000)  // 10ms
+        try await Task.sleep(for: .milliseconds(10))
 
         #expect(await transport.sentMessages.count == 1)
-        #expect(await transport.sentMessages[0].contains(Initialize.name))
-        #expect(await transport.sentMessages[0].contains(client.name))
-        #expect(await transport.sentMessages[0].contains(client.version))
+        #expect(await transport.sentMessages.first?.contains(Initialize.name) == true)
+        #expect(await transport.sentMessages.first?.contains(client.name) == true)
+        #expect(await transport.sentMessages.first?.contains(client.version) == true)
 
         // Cancel the initialize task
         initTask.cancel()
 
         // Disconnect client to clean up message loop and give time for continuation cleanup
         await client.disconnect()
-        try await Task.sleep(nanoseconds: 50_000_000)  // 50ms
+        try await Task.sleep(for: .milliseconds(50))
     }
 
     @Test(
@@ -60,7 +60,7 @@ struct ClientTests {
 
         try await client.connect(transport: transport)
         // Small delay to ensure message loop is started
-        try await Task.sleep(nanoseconds: 10_000_000)  // 10ms
+        try await Task.sleep(for: .milliseconds(10))
 
         // Create a task for the ping that we'll cancel
         let pingTask = Task {
@@ -68,17 +68,17 @@ struct ClientTests {
         }
 
         // Give it a moment to send the request
-        try await Task.sleep(nanoseconds: 10_000_000)  // 10ms
+        try await Task.sleep(for: .milliseconds(10))
 
         #expect(await transport.sentMessages.count == 1)
-        #expect(await transport.sentMessages[0].contains(Ping.name))
+        #expect(await transport.sentMessages.first?.contains(Ping.name) == true)
 
         // Cancel the ping task
         pingTask.cancel()
 
         // Disconnect client to clean up message loop and give time for continuation cleanup
         await client.disconnect()
-        try await Task.sleep(nanoseconds: 50_000_000)  // 50ms
+        try await Task.sleep(for: .milliseconds(50))
     }
 
     @Test("Connection failure handling")
@@ -168,7 +168,7 @@ struct ClientTests {
 
         // Wait a bit for any setup to complete
         try await Task.sleep(for: .milliseconds(10))
-        
+
         // Send the listPrompts request and immediately provide an error response
         let promptsTask = Task {
             do {
@@ -187,7 +187,7 @@ struct ClientTests {
                         id: decodedRequest.id,
                         error: Error.methodNotFound("Test: Prompts capability not available")
                     )
-                    try await transport.queueResponse(errorResponse)
+                    try await transport.queue(response: errorResponse)
 
                     // Try the request now that we have a response queued
                     do {
