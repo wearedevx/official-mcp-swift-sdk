@@ -112,16 +112,16 @@ public actor Client {
     private var task: Task<Void, Never>?
 
     /// An error indicating a type mismatch when decoding a pending request
-    private struct TypeMismatchError: Swift.Error {}
+    private struct TypeMismatchError: Error {}
 
     /// A pending request with a continuation for the result
     private struct PendingRequest<T> {
-        let continuation: CheckedContinuation<T, Swift.Error>
+        let continuation: CheckedContinuation<T, Error>
     }
 
     /// A type-erased pending request
     private struct AnyPendingRequest {
-        private let _resume: (Result<Any, Swift.Error>) -> Void
+        private let _resume: (Result<Any, Error>) -> Void
 
         init<T: Sendable & Decodable>(_ request: PendingRequest<T>) {
             _resume = { result in
@@ -146,7 +146,7 @@ public actor Client {
             _resume(.success(value))
         }
 
-        func resume(throwing error: Swift.Error) {
+        func resume(throwing error: Error) {
             _resume(.failure(error))
         }
     }
@@ -201,7 +201,7 @@ public actor Client {
                                 "Unexpected message received by client", metadata: metadata)
                         }
                     }
-                } catch let error where Error.isResourceTemporarilyUnavailable(error) {
+                } catch let error where MCPError.isResourceTemporarilyUnavailable(error) {
                     try? await Task.sleep(for: .milliseconds(10))
                     continue
                 } catch {
@@ -217,7 +217,7 @@ public actor Client {
     public func disconnect() async {
         // Cancel all pending requests
         for (id, request) in pendingRequests {
-            request.resume(throwing: Error.internalError("Client disconnected"))
+            request.resume(throwing: MCPError.internalError("Client disconnected"))
             pendingRequests.removeValue(forKey: id)
         }
 
@@ -247,7 +247,7 @@ public actor Client {
     /// Send a request and receive its response
     public func send<M: Method>(_ request: Request<M>) async throws -> M.Result {
         guard let connection = connection else {
-            throw Error.internalError("Client connection not initialized")
+            throw MCPError.internalError("Client connection not initialized")
         }
 
         let requestData = try JSONEncoder().encode(request)
@@ -274,7 +274,7 @@ public actor Client {
 
     private func addPendingRequest<T: Sendable & Decodable>(
         id: ID,
-        continuation: CheckedContinuation<T, Swift.Error>,
+        continuation: CheckedContinuation<T, Error>,
         type: T.Type
     ) {
         pendingRequests[id] = AnyPendingRequest(PendingRequest(continuation: continuation))
@@ -439,10 +439,10 @@ public actor Client {
     {
         if configuration.strict {
             guard let capabilities = serverCapabilities else {
-                throw Error.methodNotFound("Server capabilities not initialized")
+                throw MCPError.methodNotFound("Server capabilities not initialized")
             }
             guard capabilities[keyPath: keyPath] != nil else {
-                throw Error.methodNotFound("\(name) is not supported by the server")
+                throw MCPError.methodNotFound("\(name) is not supported by the server")
             }
         }
     }

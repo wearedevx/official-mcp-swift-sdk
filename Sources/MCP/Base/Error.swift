@@ -6,8 +6,24 @@ import Foundation
     @preconcurrency import SystemPackage
 #endif
 
+/// Top-level namespace for backward compatibility
+///
+/// This is provided to allow existing code that uses `MCP.Error` to continue
+/// to work without modification.
+///
+/// The MCPError type is now the recommended way to handle errors in MCP.
+///
+/// - Warning: This namespace is deprecated and will be removed in a future version.
+public enum MCP {
+    /// Deprecated type alias for MCPError
+    @available(*, deprecated, renamed: "MCPError", message: "Use MCPError instead of MCP.Error")
+    public typealias Error = MCPError
+}
+
+// MARK: -
+
 /// A model context protocol error.
-public enum Error: Sendable {
+public enum MCPError: Error, Sendable {
     // Standard JSON-RPC 2.0 errors (-32700 to -32603)
     case parseError(String?)  // -32700
     case invalidRequest(String?)  // -32600
@@ -20,7 +36,7 @@ public enum Error: Sendable {
 
     // Transport specific errors
     case connectionClosed
-    case transportError(Swift.Error)
+    case transportError(Error)
 
     /// The JSON-RPC 2.0 error code
     public var code: Int {
@@ -37,7 +53,7 @@ public enum Error: Sendable {
     }
 
     /// Check if an error represents a "resource temporarily unavailable" condition
-    public static func isResourceTemporarilyUnavailable(_ error: Swift.Error) -> Bool {
+    public static func isResourceTemporarilyUnavailable(_ error: Error) -> Bool {
         #if canImport(System)
             if let errno = error as? System.Errno, errno == .resourceTemporarilyUnavailable {
                 return true
@@ -53,7 +69,7 @@ public enum Error: Sendable {
 
 // MARK: LocalizedError
 
-extension Error: LocalizedError {
+extension MCPError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .parseError(let detail):
@@ -116,7 +132,7 @@ extension Error: LocalizedError {
 
 // MARK: CustomDebugStringConvertible
 
-extension Error: CustomDebugStringConvertible {
+extension MCPError: CustomDebugStringConvertible {
     public var debugDescription: String {
         switch self {
         case .transportError(let error):
@@ -131,7 +147,7 @@ extension Error: CustomDebugStringConvertible {
 
 // MARK: Codable
 
-extension Error: Codable {
+extension MCPError: Codable {
     private enum CodingKeys: String, CodingKey {
         case code, message, data
     }
@@ -199,15 +215,15 @@ extension Error: Codable {
 
 // MARK: Equatable
 
-extension Error: Equatable {
-    public static func == (lhs: Error, rhs: Error) -> Bool {
+extension MCPError: Equatable {
+    public static func == (lhs: MCPError, rhs: MCPError) -> Bool {
         lhs.code == rhs.code
     }
 }
 
 // MARK: Hashable
 
-extension Error: Hashable {
+extension MCPError: Hashable {
     public func hash(into hasher: inout Hasher) {
         hasher.combine(code)
         switch self {

@@ -57,7 +57,7 @@ struct StdioTransportTests {
         try writer.close()
 
         // Start receiving messages
-        let stream: AsyncThrowingStream<Data, Swift.Error> = await transport.receive()
+        let stream: AsyncThrowingStream<Data, Error> = await transport.receive()
         var iterator = stream.makeAsyncIterator()
 
         // Get first message
@@ -79,7 +79,7 @@ struct StdioTransportTests {
         try writer.writeAll(invalidJSON.data(using: .utf8)!)
         try writer.close()
 
-        let stream: AsyncThrowingStream<Data, Swift.Error> = await transport.receive()
+        let stream: AsyncThrowingStream<Data, Error> = await transport.receive()
         var iterator = stream.makeAsyncIterator()
 
         _ = try await iterator.next()
@@ -100,7 +100,7 @@ struct StdioTransportTests {
             try await transport.connect()
             #expect(Bool(false), "Expected connect to throw an error")
         } catch {
-            #expect(error is MCP.Error)
+            #expect(error is MCPError)
         }
 
         await transport.disconnect()
@@ -119,7 +119,7 @@ struct StdioTransportTests {
             try await transport.connect()
             #expect(Bool(false), "Expected connect to throw an error")
         } catch {
-            #expect(error is MCP.Error)
+            #expect(error is MCPError)
         }
 
         await transport.disconnect()
