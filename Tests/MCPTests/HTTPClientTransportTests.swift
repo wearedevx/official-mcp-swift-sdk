@@ -160,7 +160,6 @@ struct HTTPClientTransportTests {
 
         await MockURLProtocol.requestHandlerStorage.setHandler {
             [testEndpoint] (request: URLRequest) in
-            dump(request)
             #expect(request.url == testEndpoint)
             #expect(request.httpMethod == "POST")
             #expect(request.readBody() == messageData)
