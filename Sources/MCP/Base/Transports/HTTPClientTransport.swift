@@ -177,7 +177,12 @@ public actor HTTPClientTransport: Actor, Transport {
             }
         }
     }
-
+    
+    #if canImport(FoundationNetworking)
+    private func connectToEventStream() async throws {
+        logger.warning("SSE is not supported on this platform")
+    }
+    #else
     /// Establishes an SSE connection to the server
     private func connectToEventStream() async throws {
         guard isConnected else { return }
@@ -296,4 +301,5 @@ public actor HTTPClientTransport: Actor, Transport {
             }
         }
     }
+    #endif
 }
