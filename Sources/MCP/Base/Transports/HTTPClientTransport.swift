@@ -1,6 +1,10 @@
 import Foundation
 import Logging
 
+#if canImport(FoundationNetworking)
+    import FoundationNetworking
+#endif
+
 public actor HTTPClientTransport: Actor, Transport {
     public let endpoint: URL
     private let session: URLSession
