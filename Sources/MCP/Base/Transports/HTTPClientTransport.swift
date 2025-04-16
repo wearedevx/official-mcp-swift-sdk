@@ -6,7 +6,8 @@ import Logging
 #endif
 
 public actor HTTPClientTransport: Actor, Transport {
-    public let endpoint: URL
+    public var endpoint: URL
+    private var endpointOK: Bool = false
     private let session: URLSession
     public private(set) var sessionID: String?
     private let streaming: Bool
@@ -63,6 +64,19 @@ public actor HTTPClientTransport: Actor, Transport {
         if streaming {
             // Start listening to server events
             streamingTask = Task { await startListeningForServerEvents() }
+        }
+        
+        // wait for the connection to happen with a valid endpoint
+        let timeoutNs = 45_000_000_000 // 45 seconds
+        let sleepIntervalNs: UInt64 = 50_000_000 // 50 ms
+        var elapsedNs: UInt64 = 0
+
+        while !endpointOK {
+            if elapsedNs >= timeoutNs {
+                throw MCPError.internalError("Timeout waiting for valid endpoint from SSE")
+            }
+            try await Task.sleep(nanoseconds: sleepIntervalNs)
+            elapsedNs += sleepIntervalNs
         }
 
         logger.info("HTTP transport connected")
@@ -243,6 +257,20 @@ public actor HTTPClientTransport: Actor, Transport {
                             // Process the event
                             if eventType == "id" {
                                 lastEventID = eventID
+                            } else if eventType == "endpoint" {
+                                // Construct the new endpoint URL using the original scheme and host
+                                if let scheme = self.endpoint.scheme, let host = self.endpoint.host {
+                                    let portString = self.endpoint.port.map { ":\($0)" } ?? ""
+                                    if let newEndpoint = URL(string: "\(scheme)://\(host)\(portString)\(eventData)") {
+                                        endpoint = newEndpoint
+                                        endpointOK = true
+                                        logger.info("Received new endpoint via SSE: \(newEndpoint.absoluteString)")
+                                    } else {
+                                        logger.error("Failed to construct new endpoint URL from SSE data: \(eventData)")
+                                    }
+                                } else {
+                                    logger.error("Original endpoint is missing scheme or host, cannot construct new endpoint.")
+                                }
                             } else {
                                 // Default event type is "message" if not specified
                                 if let data = eventData.data(using: .utf8) {

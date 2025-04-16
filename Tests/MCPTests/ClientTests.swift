@@ -363,4 +363,53 @@ struct ClientTests {
 
         await client.disconnect()
     }
+
+    @Test("Real Server SSE Connection and Ping")
+    func testRealServerSSEConnection() async throws {
+        guard let endpoint = URL(string: "http://golgoth:3010/9cf889b8-55fc-475d-9a7e-cb60d1d94621/github") else {
+            #expect(Bool(false), "Invalid URL provided")
+            return
+        }
+
+        // Use HTTPClientTransport with streaming enabled for SSE
+        let transport = HTTPClientTransport(endpoint: endpoint, streaming: true)
+        let client = Client(name: "TestClientSSE", version: "1.0")
+
+        do {
+            print("Attempting to connect to SSE endpoint: \\(endpoint)")
+            try await client.connect(transport: transport)
+            print("Successfully connected.")
+
+            // Connection implicitly checked by successful connect and ping
+
+            // Allow some time for connection stabilization and server handshake if needed
+
+            print("Attempting to ping server...")
+            // Perform a ping request to verify communication
+            // Add a timeout to avoid hanging indefinitely
+            try await client.ping()
+            print("Ping successful.")
+            
+//            let tools = try await client.listTools()
+//            print("toolsç", tools)
+            
+            let result = try await client.callTool(name: "github-get-repository", arguments: ["repoFullname":"wearedevx/alter"])
+            print("result", result)
+
+        } catch let mcpError as MCPError {
+            print("Test failed with MCPError: \\(mcpError)")
+            #expect(Bool(false), "MCPError occurred: \\(mcpError)")
+        } catch let urlError as URLError {
+            print("Test failed with URLError: \\(urlError)")
+            #expect(Bool(false), "URLError occurred: \\(urlError)")
+        } catch {
+            print("Test failed with unexpected error: \\(error)")
+            #expect(Bool(false), "Unexpected error occurred: \\(error)")
+        }
+
+        print("Disconnecting...")
+        await client.disconnect()
+        // Disconnect is called, state check removed as isConnected is private
+        print("Disconnected.")
+    }
 }
