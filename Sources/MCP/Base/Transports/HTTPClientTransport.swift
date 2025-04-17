@@ -14,7 +14,7 @@ public actor HTTPClientTransport: Actor, Transport {
     private var streamingTask: Task<Void, Never>?
     private var lastEventID: String?
     public nonisolated let logger: Logger
-
+    public var endpointCommunication: URL?
     private var isConnected = false
     private let messageStream: AsyncThrowingStream<Data, Swift.Error>
     private let messageContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
@@ -23,21 +23,24 @@ public actor HTTPClientTransport: Actor, Transport {
         endpoint: URL,
         configuration: URLSessionConfiguration = .default,
         streaming: Bool = false,
-        logger: Logger? = nil
+        logger: Logger? = nil,
+        endpointCommunication: URL? = nil
     ) {
         self.init(
             endpoint: endpoint,
             session: URLSession(configuration: configuration),
             streaming: streaming,
-            logger: logger
+            logger: logger,
+            endpointCommunication: endpointCommunication
         )
     }
 
-    internal init(
+    init(
         endpoint: URL,
         session: URLSession,
         streaming: Bool = false,
-        logger: Logger? = nil
+        logger: Logger? = nil,
+        endpointCommunication: URL? = nil
     ) {
         self.endpoint = endpoint
         self.session = session
@@ -50,10 +53,11 @@ public actor HTTPClientTransport: Actor, Transport {
 
         self.logger =
             logger
-            ?? Logger(
-                label: "mcp.transport.http.client",
-                factory: { _ in SwiftLogNoOpLogHandler() }
-            )
+                ?? Logger(
+                    label: "mcp.transport.http.client",
+                    factory: { _ in SwiftLogNoOpLogHandler() }
+                )
+        self.endpointCommunication = endpointCommunication
     }
 
     /// Establishes connection with the transport
@@ -65,7 +69,7 @@ public actor HTTPClientTransport: Actor, Transport {
             // Start listening to server events
             streamingTask = Task { await startListeningForServerEvents() }
         }
-        
+
         // wait for the connection to happen with a valid endpoint
         let timeoutNs = 45_000_000_000 // 45 seconds
         let sleepIntervalNs: UInt64 = 50_000_000 // 50 ms
@@ -113,7 +117,7 @@ public actor HTTPClientTransport: Actor, Transport {
         request.httpBody = data
 
         // Add session ID if available
-        if let sessionID = sessionID {
+        if let sessionID {
             request.addValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
         }
 
@@ -143,10 +147,11 @@ public actor HTTPClientTransport: Actor, Transport {
             }
 
             // For JSON responses, deliver the data directly
-            if contentType.contains("application/json") && !responseData.isEmpty {
+            if contentType.contains("application/json"), !responseData.isEmpty {
                 logger.debug("Received JSON response", metadata: ["size": "\(responseData.count)"])
                 messageContinuation.yield(responseData)
             }
+
         case 404:
             // If we get a 404 with a session ID, it means our session is invalid
             if sessionID != nil {
@@ -155,6 +160,7 @@ public actor HTTPClientTransport: Actor, Transport {
                 throw MCPError.internalError("Session expired")
             }
             throw MCPError.internalError("Endpoint not found")
+
         default:
             throw MCPError.internalError("HTTP error: \(httpResponse.statusCode)")
         }
@@ -162,7 +168,7 @@ public actor HTTPClientTransport: Actor, Transport {
 
     /// Receives data in an async sequence
     public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
-        return AsyncThrowingStream { continuation in
+        AsyncThrowingStream { continuation in
             Task {
                 for try await message in messageStream {
                     continuation.yield(message)
@@ -179,14 +185,14 @@ public actor HTTPClientTransport: Actor, Transport {
         guard isConnected else { return }
 
         // Retry loop for connection drops
-        while isConnected && !Task.isCancelled {
+        while isConnected, !Task.isCancelled {
             do {
                 try await connectToEventStream()
             } catch {
                 if !Task.isCancelled {
                     logger.error("SSE connection error: \(error)")
                     // Wait before retrying
-                    try? await Task.sleep(nanoseconds: 1_000_000_000)  // 1 second
+                    try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
                 }
             }
         }
@@ -206,12 +212,12 @@ public actor HTTPClientTransport: Actor, Transport {
             request.addValue("text/event-stream", forHTTPHeaderField: "Accept")
 
             // Add session ID if available
-            if let sessionID = sessionID {
+            if let sessionID {
                 request.addValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
             }
 
             // Add Last-Event-ID header for resumability if available
-            if let lastEventID = lastEventID {
+            if let lastEventID {
                 request.addValue(lastEventID, forHTTPHeaderField: "Last-Event-ID")
             }
 
@@ -258,8 +264,16 @@ public actor HTTPClientTransport: Actor, Transport {
                             if eventType == "id" {
                                 lastEventID = eventID
                             } else if eventType == "endpoint" {
-                                // Construct the new endpoint URL using the original scheme and host
-                                if let scheme = self.endpoint.scheme, let host = self.endpoint.host {
+                                if let endpointCommunication {
+                                    if let newEndpoint = URL(string: "\(endpointCommunication.absoluteString)\(eventData)") {
+                                        endpoint = newEndpoint
+                                        endpointOK = true
+                                        logger.info("Received new endpoint via SSE with endpointCommunication: \(newEndpoint.absoluteString)")
+                                    } else {
+                                        logger.error("Failed to construct new endpoint URL from SSE data: \(eventData)")
+                                    }
+                                } else if let scheme = self.endpoint.scheme, let host = self.endpoint.host {
+                                    // Construct the new endpoint URL using the original scheme and host
                                     let portString = self.endpoint.port.map { ":\($0)" } ?? ""
                                     if let newEndpoint = URL(string: "\(scheme)://\(host)\(portString)\(eventData)") {
                                         endpoint = newEndpoint
@@ -278,8 +292,9 @@ public actor HTTPClientTransport: Actor, Transport {
                                         "SSE event received",
                                         metadata: [
                                             "type": "\(eventType.isEmpty ? "message" : eventType)",
-                                            "id": "\(eventID ?? "none")",
-                                        ])
+                                            "id": "\(eventID ?? "none")"
+                                        ]
+                                    )
                                     messageContinuation.yield(data)
                                 }
                             }
@@ -308,19 +323,23 @@ public actor HTTPClientTransport: Actor, Transport {
                         switch field {
                         case "event":
                             eventType = value
+
                         case "data":
                             if !eventData.isEmpty {
                                 eventData.append("\n")
                             }
                             eventData.append(value)
+
                         case "id":
-                            if !value.contains("\0") {  // ID must not contain NULL
+                            if !value.contains("\0") { // ID must not contain NULL
                                 eventID = value
                                 lastEventID = value
                             }
+
                         case "retry":
                             // Retry timing not implemented
                             break
+
                         default:
                             // Unknown fields are ignored per SSE spec
                             break
