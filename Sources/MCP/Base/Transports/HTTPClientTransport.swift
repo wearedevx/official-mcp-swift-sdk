@@ -8,6 +8,7 @@ import Logging
 public actor HTTPClientTransport: Actor, Transport {
     public var endpoint: URL
     private var endpointOK: Bool = false
+    private var jwt: String? = ""
     private let session: URLSession
     public private(set) var sessionID: String?
     private let streaming: Bool
@@ -24,14 +25,16 @@ public actor HTTPClientTransport: Actor, Transport {
         configuration: URLSessionConfiguration = .default,
         streaming: Bool = false,
         logger: Logger? = nil,
-        endpointCommunication: URL? = nil
+        endpointCommunication: URL? = nil,
+        jwt: String? = nil
     ) {
         self.init(
             endpoint: endpoint,
             session: URLSession(configuration: configuration),
             streaming: streaming,
             logger: logger,
-            endpointCommunication: endpointCommunication
+            endpointCommunication: endpointCommunication,
+            jwt: jwt
         )
     }
 
@@ -40,7 +43,8 @@ public actor HTTPClientTransport: Actor, Transport {
         session: URLSession,
         streaming: Bool = false,
         logger: Logger? = nil,
-        endpointCommunication: URL? = nil
+        endpointCommunication: URL? = nil,
+        jwt: String? = nil
     ) {
         self.endpoint = endpoint
         self.session = session
@@ -58,6 +62,7 @@ public actor HTTPClientTransport: Actor, Transport {
                     factory: { _ in SwiftLogNoOpLogHandler() }
                 )
         self.endpointCommunication = endpointCommunication
+        self.jwt = jwt
     }
 
     /// Establishes connection with the transport
@@ -114,6 +119,11 @@ public actor HTTPClientTransport: Actor, Transport {
         request.httpMethod = "POST"
         request.addValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        if let jwt {
+            request.addValue("Bearer \(jwt)", forHTTPHeaderField: "Authorization")
+        }
+
         request.httpBody = data
 
         // Add session ID if available
@@ -210,6 +220,10 @@ public actor HTTPClientTransport: Actor, Transport {
             var request = URLRequest(url: endpoint)
             request.httpMethod = "GET"
             request.addValue("text/event-stream", forHTTPHeaderField: "Accept")
+
+            if let jwt {
+                request.addValue("Bearer \(jwt)", forHTTPHeaderField: "Authorization")
+            }
 
             // Add session ID if available
             if let sessionID {
