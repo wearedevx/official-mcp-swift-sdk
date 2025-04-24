@@ -7,7 +7,7 @@ import Logging
 
 public actor HTTPClientTransport: Actor, Transport {
     public var endpoint: URL
-    private var endpointOK: Bool = false
+    private var endpointPostURL: URL?
     private var jwt: String? = ""
     private let session: URLSession
     public private(set) var sessionID: String?
@@ -52,8 +52,8 @@ public actor HTTPClientTransport: Actor, Transport {
 
         // Create message stream
         var continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation!
-        self.messageStream = AsyncThrowingStream { continuation = $0 }
-        self.messageContinuation = continuation
+        messageStream = AsyncThrowingStream { continuation = $0 }
+        messageContinuation = continuation
 
         self.logger =
             logger
@@ -80,7 +80,7 @@ public actor HTTPClientTransport: Actor, Transport {
         let sleepIntervalNs: UInt64 = 50_000_000 // 50 ms
         var elapsedNs: UInt64 = 0
 
-        while !endpointOK {
+        while endpointPostURL == nil {
             if elapsedNs >= timeoutNs {
                 throw MCPError.internalError("Timeout waiting for valid endpoint from SSE")
             }
@@ -142,7 +142,7 @@ public actor HTTPClientTransport: Actor, Transport {
 
         // Extract session ID if present
         if let newSessionID = httpResponse.value(forHTTPHeaderField: "Mcp-Session-Id") {
-            self.sessionID = newSessionID
+            sessionID = newSessionID
             logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
         }
 
@@ -251,7 +251,7 @@ public actor HTTPClientTransport: Actor, Transport {
 
             // Extract session ID if present
             if let newSessionID = httpResponse.value(forHTTPHeaderField: "Mcp-Session-Id") {
-                self.sessionID = newSessionID
+                sessionID = newSessionID
             }
 
             // Process the SSE stream
@@ -280,18 +280,16 @@ public actor HTTPClientTransport: Actor, Transport {
                             } else if eventType == "endpoint" {
                                 if let endpointCommunication {
                                     if let newEndpoint = URL(string: "\(endpointCommunication.absoluteString)\(eventData)") {
-                                        endpoint = newEndpoint
-                                        endpointOK = true
+                                        endpointPostURL = newEndpoint
                                         logger.info("Received new endpoint via SSE with endpointCommunication: \(newEndpoint.absoluteString)")
                                     } else {
                                         logger.error("Failed to construct new endpoint URL from SSE data: \(eventData)")
                                     }
-                                } else if let scheme = self.endpoint.scheme, let host = self.endpoint.host {
+                                } else if let scheme = endpoint.scheme, let host = endpoint.host {
                                     // Construct the new endpoint URL using the original scheme and host
-                                    let portString = self.endpoint.port.map { ":\($0)" } ?? ""
+                                    let portString = endpoint.port.map { ":\($0)" } ?? ""
                                     if let newEndpoint = URL(string: "\(scheme)://\(host)\(portString)\(eventData)") {
-                                        endpoint = newEndpoint
-                                        endpointOK = true
+                                        endpointPostURL = newEndpoint
                                         logger.info("Received new endpoint via SSE: \(newEndpoint.absoluteString)")
                                     } else {
                                         logger.error("Failed to construct new endpoint URL from SSE data: \(eventData)")
