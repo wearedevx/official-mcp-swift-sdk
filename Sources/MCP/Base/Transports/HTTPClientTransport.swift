@@ -255,7 +255,7 @@ public actor HTTPClientTransport: Actor, Transport {
             }
 
             // Process the SSE stream
-            var buffer = ""
+            var buffer: [UInt8] = []
             var eventType = ""
             var eventID: String?
             var eventData = ""
@@ -263,98 +263,107 @@ public actor HTTPClientTransport: Actor, Transport {
             for try await byte in stream {
                 if Task.isCancelled { break }
 
-                guard let char = String(bytes: [byte], encoding: .utf8) else { continue }
-                buffer.append(char)
+                buffer.append(byte)
 
-                // Process complete lines
-                while let newlineIndex = buffer.firstIndex(of: "\n") {
-                    let line = buffer[..<newlineIndex]
-                    buffer = String(buffer[buffer.index(after: newlineIndex)...])
-
-                    // Empty line marks the end of an event
-                    if line.isEmpty || line == "\r" || line == "\n" || line == "\r\n" {
-                        if !eventData.isEmpty {
-                            // Process the event
-                            if eventType == "id" {
-                                lastEventID = eventID
-                            } else if eventType == "endpoint" {
-                                if let endpointCommunication {
-                                    if let newEndpoint = URL(string: "\(endpointCommunication.absoluteString)\(eventData)") {
-                                        endpointPostURL = newEndpoint
-                                        logger.info("Received new endpoint via SSE with endpointCommunication: \(newEndpoint.absoluteString)")
-                                    } else {
-                                        logger.error("Failed to construct new endpoint URL from SSE data: \(eventData)")
-                                    }
-                                } else if let scheme = endpoint.scheme, let host = endpoint.host {
-                                    // Construct the new endpoint URL using the original scheme and host
-                                    let portString = endpoint.port.map { ":\($0)" } ?? ""
-                                    if let newEndpoint = URL(string: "\(scheme)://\(host)\(portString)\(eventData)") {
-                                        endpointPostURL = newEndpoint
-                                        logger.info("Received new endpoint via SSE: \(newEndpoint.absoluteString)")
-                                    } else {
-                                        logger.error("Failed to construct new endpoint URL from SSE data: \(eventData)")
-                                    }
-                                } else {
-                                    logger.error("Original endpoint is missing scheme or host, cannot construct new endpoint.")
-                                }
-                            } else {
-                                // Default event type is "message" if not specified
-                                if let data = eventData.data(using: .utf8) {
-                                    logger.debug(
-                                        "SSE event received",
-                                        metadata: [
-                                            "type": "\(eventType.isEmpty ? "message" : eventType)",
-                                            "id": "\(eventID ?? "none")",
-                                        ]
-                                    )
-                                    messageContinuation.yield(data)
-                                }
-                            }
-
-                            // Reset for next event
-                            eventType = ""
-                            eventData = ""
+                if String(bytes: [byte], encoding: .utf8) == "\n" {
+                    // Process complete lines
+                    Task(priority: .userInitiated) {
+                        guard let lines = String(bytes: buffer, encoding: .utf8)
+                        else {
+                            buffer.removeAll()
+                            return
                         }
-                        continue
-                    }
+                        buffer.removeAll()
 
-                    // Lines starting with ":" are comments
-                    if line.hasPrefix(":") { continue }
+                        for line in lines.split(separator: "\n", omittingEmptySubsequences: false) {
+                            print(line)
 
-                    // Parse field: value format
-                    if let colonIndex = line.firstIndex(of: ":") {
-                        let field = String(line[..<colonIndex])
-                        var value = String(line[line.index(after: colonIndex)...])
+                            // Empty line marks the end of an event
+                            if line.isEmpty || line == "\r" || line == "\n" || line == "\r\n" {
+                                if !eventData.isEmpty {
+                                    // Process the event
+                                    if eventType == "id" {
+                                        lastEventID = eventID
+                                    } else if eventType == "endpoint" {
+                                        if let endpointCommunication {
+                                            if let newEndpoint = URL(string: "\(endpointCommunication.absoluteString)\(eventData)") {
+                                                endpointPostURL = newEndpoint
+                                                logger.info("Received new endpoint via SSE with endpointCommunication: \(newEndpoint.absoluteString)")
+                                            } else {
+                                                logger.error("Failed to construct new endpoint URL from SSE data: \(eventData)")
+                                            }
+                                        } else if let scheme = endpoint.scheme, let host = endpoint.host {
+                                            // Construct the new endpoint URL using the original scheme and host
+                                            let portString = endpoint.port.map { ":\($0)" } ?? ""
+                                            if let newEndpoint = URL(string: "\(scheme)://\(host)\(portString)\(eventData)") {
+                                                endpointPostURL = newEndpoint
+                                                logger.info("Received new endpoint via SSE: \(newEndpoint.absoluteString)")
+                                            } else {
+                                                logger.error("Failed to construct new endpoint URL from SSE data: \(eventData)")
+                                            }
+                                        } else {
+                                            logger.error("Original endpoint is missing scheme or host, cannot construct new endpoint.")
+                                        }
+                                    } else {
+                                        // Default event type is "message" if not specified
+                                        if let data = eventData.data(using: .utf8) {
+                                            logger.debug(
+                                                "SSE event received",
+                                                metadata: [
+                                                    "type": "\(eventType.isEmpty ? "message" : eventType)",
+                                                    "id": "\(eventID ?? "none")",
+                                                ]
+                                            )
+                                            messageContinuation.yield(data)
+                                        }
+                                    }
 
-                        // Trim leading space
-                        if value.hasPrefix(" ") {
-                            value = String(value.dropFirst())
-                        }
-
-                        // Process based on field
-                        switch field {
-                        case "event":
-                            eventType = value
-
-                        case "data":
-                            if !eventData.isEmpty {
-                                eventData.append("\n")
+                                    // Reset for next event
+                                    eventType = ""
+                                    eventData = ""
+                                }
+                                return
                             }
-                            eventData.append(value)
 
-                        case "id":
-                            if !value.contains("\0") { // ID must not contain NULL
-                                eventID = value
-                                lastEventID = value
+                            // Lines starting with ":" are comments
+                            if line.hasPrefix(":") { return }
+
+                            // Parse field: value format
+                            if let colonIndex = line.firstIndex(of: ":") {
+                                let field = String(line[..<colonIndex])
+                                var value = String(line[line.index(after: colonIndex)...])
+
+                                // Trim leading space
+                                if value.hasPrefix(" ") {
+                                    value = String(value.dropFirst())
+                                }
+
+                                // Process based on field
+                                switch field {
+                                case "event":
+                                    eventType = value
+
+                                case "data":
+                                    if !eventData.isEmpty {
+                                        eventData.append("\n")
+                                    }
+                                    eventData.append(value)
+
+                                case "id":
+                                    if !value.contains("\0") { // ID must not contain NULL
+                                        eventID = value
+                                        lastEventID = value
+                                    }
+
+                                case "retry":
+                                    // Retry timing not implemented
+                                    break
+
+                                default:
+                                    // Unknown fields are ignored per SSE spec
+                                    break
+                                }
                             }
-
-                        case "retry":
-                            // Retry timing not implemented
-                            break
-
-                        default:
-                            // Unknown fields are ignored per SSE spec
-                            break
                         }
                     }
                 }
