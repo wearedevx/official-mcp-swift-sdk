@@ -7,7 +7,7 @@ import Logging
 
 public actor HTTPClientTransport: Actor, Transport {
     public var endpoint: URL
-    private var endpointPostURL: URL?
+    public var endpointPostURL: URL?
     private var jwt: String? = ""
     private let session: URLSession
     public private(set) var sessionID: String?
@@ -115,7 +115,7 @@ public actor HTTPClientTransport: Actor, Transport {
             throw MCPError.internalError("Transport not connected")
         }
 
-        var request = URLRequest(url: endpoint)
+        var request = URLRequest(url: endpointPostURL ?? endpoint)
         request.httpMethod = "POST"
         request.addValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -304,7 +304,7 @@ public actor HTTPClientTransport: Actor, Transport {
                                         "SSE event received",
                                         metadata: [
                                             "type": "\(eventType.isEmpty ? "message" : eventType)",
-                                            "id": "\(eventID ?? "none")"
+                                            "id": "\(eventID ?? "none")",
                                         ]
                                     )
                                     messageContinuation.yield(data)
