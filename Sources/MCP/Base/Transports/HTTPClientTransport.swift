@@ -276,8 +276,6 @@ public actor HTTPClientTransport: Actor, Transport {
                         buffer.removeAll()
 
                         for line in lines.split(separator: "\n", omittingEmptySubsequences: false) {
-                            print(line)
-
                             // Empty line marks the end of an event
                             if line.isEmpty || line == "\r" || line == "\n" || line == "\r\n" {
                                 if !eventData.isEmpty {
