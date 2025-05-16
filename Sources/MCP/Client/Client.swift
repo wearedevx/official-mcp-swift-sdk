@@ -115,8 +115,30 @@ public actor Client {
     private struct TypeMismatchError: Swift.Error {}
 
     /// A pending request with a continuation for the result
-    private struct PendingRequest<T> {
-        let continuation: CheckedContinuation<T, Swift.Error>
+    private class PendingRequest<T: Sendable> {
+        private let continuation: CheckedContinuation<T, Swift.Error>
+        var used: Bool
+
+        init(continuation: CheckedContinuation<T, Swift.Error>) {
+            self.continuation = continuation
+            used = false
+        }
+
+        // Wrap the continuation to avoid calling resume twice
+        func resume(returning value: T) {
+            if !used {
+                continuation.resume(returning: value)
+                used = true
+            }
+        }
+
+        // Wrap the continuation to avoid calling resume twice
+        func resume(throwing error: Swift.Error) {
+            if !used {
+                continuation.resume(throwing: error)
+                used = false
+            }
+        }
     }
 
     /// A type-erased pending request
@@ -128,20 +150,21 @@ public actor Client {
                 switch result {
                 case .success(let value):
                     if let typedValue = value as? T {
-                        request.continuation.resume(returning: typedValue)
+                        request.resume(returning: typedValue)
                     } else if let value = value as? Value,
-                        let data = try? JSONEncoder().encode(value),
-                        let decoded = try? JSONDecoder().decode(T.self, from: data)
+                              let data = try? JSONEncoder().encode(value),
+                              let decoded = try? JSONDecoder().decode(T.self, from: data)
                     {
-                        request.continuation.resume(returning: decoded)
+                        request.resume(returning: decoded)
                     } else {
-                        request.continuation.resume(throwing: TypeMismatchError())
+                        request.resume(throwing: TypeMismatchError())
                     }
                 case .failure(let error):
-                    request.continuation.resume(throwing: error)
+                    request.resume(throwing: error)
                 }
             }
         }
+
         func resume(returning value: Any) {
             _resume(.success(value))
         }
@@ -162,15 +185,15 @@ public actor Client {
         version: String,
         configuration: Configuration = .default
     ) {
-        self.clientInfo = Client.Info(name: name, version: version)
-        self.capabilities = Capabilities()
+        clientInfo = Client.Info(name: name, version: version)
+        capabilities = Capabilities()
         self.configuration = configuration
     }
 
     /// Connect to the server using the given transport
     public func connect(transport: any Transport) async throws {
-        self.connection = transport
-        try await self.connection?.connect()
+        connection = transport
+        try await connection?.connect()
 
         await logger?.info(
             "Client connected", metadata: ["name": "\(name)", "version": "\(version)"])
@@ -185,14 +208,14 @@ public actor Client {
                 do {
                     let stream = await connection.receive()
                     for try await data in stream {
-                        if Task.isCancelled { break }  // Check inside loop too
+                        if Task.isCancelled { break } // Check inside loop too
 
                         // Attempt to decode data
                         // Try decoding as a batch response first
                         if let batchResponse = try? decoder.decode([AnyResponse].self, from: data) {
                             await handleBatchResponse(batchResponse)
                         } else if let response = try? decoder.decode(AnyResponse.self, from: data),
-                            let request = pendingRequests[response.id]
+                                  let request = pendingRequests[response.id]
                         {
                             await handleResponse(response, for: request)
                         } else if let message = try? decoder.decode(AnyMessage.self, from: data) {
@@ -204,8 +227,7 @@ public actor Client {
                             }
                             await logger?.warning(
                                 "Unexpected message received by client (not single/batch response or notification)",
-                                metadata: metadata
-                            )
+                                metadata: metadata)
                         }
                     }
                 } catch let error where MCPError.isResourceTemporarilyUnavailable(error) {
@@ -266,17 +288,22 @@ public actor Client {
                 self.addPendingRequest(
                     id: request.id,
                     continuation: continuation,
-                    type: M.Result.self
-                )
+                    type: M.Result.self)
 
                 // Send the request data
                 do {
                     // Use the existing connection send
                     try await connection.send(requestData)
                 } catch {
-                    // If send fails immediately, resume continuation and remove pending request
-                    continuation.resume(throwing: error)
-                    self.removePendingRequest(id: request.id)  // Ensure cleanup on send error
+                    // We need to check if the pending request is still present
+                    // because it might have been used anyway
+                    if self.hasPendingRequest(id: request.id),
+                       let pendingRequest = self.pendingRequests[request.id]
+                    {
+                        // If send fails immediately, resume continuation and remove pending request
+                        pendingRequest.resume(throwing: error)
+                        self.removePendingRequest(id: request.id) // Ensure cleanup on send error
+                    }
                 }
             }
         }
@@ -285,9 +312,13 @@ public actor Client {
     private func addPendingRequest<T: Sendable & Decodable>(
         id: ID,
         continuation: CheckedContinuation<T, Swift.Error>,
-        type: T.Type  // Keep type for AnyPendingRequest internal logic
+        type: T.Type // Keep type for AnyPendingRequest internal logic
     ) {
         pendingRequests[id] = AnyPendingRequest(PendingRequest(continuation: continuation))
+    }
+
+    private func hasPendingRequest(id: ID) -> Bool {
+        pendingRequests[id] != nil
     }
 
     private func removePendingRequest(id: ID) {
@@ -314,7 +345,7 @@ public actor Client {
         public func addRequest<M: Method>(_ request: Request<M>) async throws -> Task<
             M.Result, Swift.Error
         > {
-            requests.append(try AnyRequest(request))
+            try requests.append(AnyRequest(request))
 
             // Return a Task that registers the pending request and awaits its result.
             // The continuation is resumed when the response arrives.
@@ -326,8 +357,7 @@ public actor Client {
                         await client.addPendingRequest(
                             id: request.id,
                             continuation: continuation,
-                            type: M.Result.self
-                        )
+                            type: M.Result.self)
                     }
                 }
             }
@@ -425,7 +455,7 @@ public actor Client {
         // Check if there are any requests to send
         guard !requests.isEmpty else {
             await logger?.info("Batch requested but no requests were added.")
-            return  // Nothing to send
+            return // Nothing to send
         }
 
         await logger?.debug(
@@ -445,14 +475,13 @@ public actor Client {
             .init(
                 protocolVersion: Version.latest,
                 capabilities: capabilities,
-                clientInfo: clientInfo
-            ))
+                clientInfo: clientInfo))
 
         let result = try await send(request)
 
-        self.serverCapabilities = result.capabilities
-        self.serverVersion = result.protocolVersion
-        self.instructions = result.instructions
+        serverCapabilities = result.capabilities
+        serverVersion = result.protocolVersion
+        instructions = result.instructions
 
         return result
     }
@@ -615,8 +644,7 @@ public actor Client {
                 // Log if a response ID doesn't match any pending request
                 await logger?.warning(
                     "Received response in batch for unknown request ID",
-                    metadata: ["id": "\(response.id)"]
-                )
+                    metadata: ["id": "\(response.id)"])
             }
         }
     }
