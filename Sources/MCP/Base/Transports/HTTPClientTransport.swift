@@ -198,6 +198,9 @@ public actor HTTPClientTransport: Actor, Transport {
         while isConnected, !Task.isCancelled {
             do {
                 try await connectToEventStream()
+            } catch let MCPError.invalidParams(error) {
+                logger.error("Invalid connection parameters: \(error ?? "unknow")")
+                break
             } catch {
                 if !Task.isCancelled {
                     logger.error("SSE connection error: \(error)")
@@ -244,8 +247,11 @@ public actor HTTPClientTransport: Actor, Transport {
                 throw MCPError.internalError("Invalid HTTP response")
             }
 
-            // Check response status
-            guard httpResponse.statusCode == 200 else {
+            switch httpResponse.statusCode {
+            case 200: break
+            case 400:
+                throw MCPError.invalidParams("Invalid parameters provided")
+            default:
                 throw MCPError.internalError("HTTP error: \(httpResponse.statusCode)")
             }
 
