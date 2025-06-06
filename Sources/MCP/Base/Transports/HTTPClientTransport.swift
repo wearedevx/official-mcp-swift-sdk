@@ -201,6 +201,9 @@ public actor HTTPClientTransport: Actor, Transport {
             } catch let MCPError.invalidParams(error) {
                 logger.error("Invalid connection parameters: \(error ?? "unknow")")
                 break
+            } catch MCPError.unauthorized {
+                logger.error("Unauthorized")
+                break
             } catch {
                 if !Task.isCancelled {
                     logger.error("SSE connection error: \(error)")
@@ -251,6 +254,8 @@ public actor HTTPClientTransport: Actor, Transport {
             case 200: break
             case 400:
                 throw MCPError.invalidParams("Invalid parameters provided")
+            case 401:
+                throw MCPError.unauthorized
             default:
                 throw MCPError.internalError("HTTP error: \(httpResponse.statusCode)")
             }

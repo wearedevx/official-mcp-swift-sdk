@@ -9,11 +9,11 @@ import Foundation
 /// A model context protocol error.
 public enum MCPError: Swift.Error, Sendable {
     // Standard JSON-RPC 2.0 errors (-32700 to -32603)
-    case parseError(String?)  // -32700
-    case invalidRequest(String?)  // -32600
-    case methodNotFound(String?)  // -32601
-    case invalidParams(String?)  // -32602
-    case internalError(String?)  // -32603
+    case parseError(String?) // -32700
+    case invalidRequest(String?) // -32600
+    case methodNotFound(String?) // -32601
+    case invalidParams(String?) // -32602
+    case internalError(String?) // -32603
 
     // Server errors (-32000 to -32099)
     case serverError(code: Int, message: String)
@@ -21,6 +21,7 @@ public enum MCPError: Swift.Error, Sendable {
     // Transport specific errors
     case connectionClosed
     case transportError(Swift.Error)
+    case unauthorized
 
     /// The JSON-RPC 2.0 error code
     public var code: Int {
@@ -33,6 +34,7 @@ public enum MCPError: Swift.Error, Sendable {
         case .serverError(let code, _): return code
         case .connectionClosed: return -32000
         case .transportError: return -32001
+        case .unauthorized: return -32002
         }
     }
 
@@ -126,7 +128,6 @@ extension MCPError: CustomDebugStringConvertible {
             return "[\(code)] \(errorDescription ?? "")"
         }
     }
-
 }
 
 // MARK: Codable
@@ -144,14 +145,14 @@ extension MCPError: Codable {
         // Encode additional data if available
         switch self {
         case .parseError(let detail),
-            .invalidRequest(let detail),
-            .methodNotFound(let detail),
-            .invalidParams(let detail),
-            .internalError(let detail):
+             .invalidRequest(let detail),
+             .methodNotFound(let detail),
+             .invalidParams(let detail),
+             .internalError(let detail):
             if let detail = detail {
                 try container.encode(["detail": detail], forKey: .data)
             }
-        case .serverError(_, _):
+        case .serverError:
             // No additional data for server errors
             break
         case .connectionClosed:
