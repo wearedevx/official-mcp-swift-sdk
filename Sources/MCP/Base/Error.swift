@@ -74,6 +74,8 @@ extension MCPError: LocalizedError {
             return "Connection closed"
         case .transportError(let error):
             return "Transport error: \(error.localizedDescription)"
+        case .unauthorized:
+            return "Unauthorized"
         }
     }
 
@@ -95,6 +97,8 @@ extension MCPError: LocalizedError {
             return "The connection to the server was closed"
         case .transportError(let error):
             return (error as? LocalizedError)?.failureReason ?? error.localizedDescription
+        case .unauthorized:
+            return "Unauthorized"
         }
     }
 
@@ -152,7 +156,7 @@ extension MCPError: Codable {
             if let detail = detail {
                 try container.encode(["detail": detail], forKey: .data)
             }
-        case .serverError:
+        case .serverError, .unauthorized:
             // No additional data for server errors
             break
         case .connectionClosed:
@@ -237,7 +241,7 @@ extension MCPError: Hashable {
             hasher.combine(detail)
         case .serverError(_, let message):
             hasher.combine(message)
-        case .connectionClosed:
+        case .connectionClosed, .unauthorized:
             break
         case .transportError(let error):
             hasher.combine(error.localizedDescription)
