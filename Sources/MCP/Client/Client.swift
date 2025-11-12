@@ -117,27 +117,22 @@ public actor Client {
     /// A pending request with a continuation for the result
     private class PendingRequest<T: Sendable> {
         private let continuation: CheckedContinuation<T, Swift.Error>
-        var used: Bool
+        private var used = false
 
         init(continuation: CheckedContinuation<T, Swift.Error>) {
             self.continuation = continuation
-            used = false
         }
 
-        // Wrap the continuation to avoid calling resume twice
         func resume(returning value: T) {
-            if !used {
-                continuation.resume(returning: value)
-                used = true
-            }
+            guard !used else { return }
+            used = true
+            continuation.resume(returning: value)
         }
 
-        // Wrap the continuation to avoid calling resume twice
         func resume(throwing error: Swift.Error) {
-            if !used {
-                continuation.resume(throwing: error)
-                used = false
-            }
+            guard !used else { return }
+            used = true
+            continuation.resume(throwing: error)
         }
     }
 
@@ -300,9 +295,9 @@ public actor Client {
                     if self.hasPendingRequest(id: request.id),
                        let pendingRequest = self.pendingRequests[request.id]
                     {
-                        // If send fails immediately, resume continuation and remove pending request
+                        // If send fails immediately, remove pending request first, then resume to avoid double-resume races
+                        self.removePendingRequest(id: request.id)
                         pendingRequest.resume(throwing: error)
-                        self.removePendingRequest(id: request.id) // Ensure cleanup on send error
                     }
                 }
             }
@@ -579,14 +574,15 @@ public actor Client {
             "Processing response",
             metadata: ["id": "\(response.id)"])
 
+        // Remove first to prevent any subsequent lookup from seeing it.
+        removePendingRequest(id: response.id)
+
         switch response.result {
         case .success(let value):
             request.resume(returning: value)
         case .failure(let error):
             request.resume(throwing: error)
         }
-
-        removePendingRequest(id: response.id)
     }
 
     private func handleMessage(_ message: Message<AnyNotification>) async {
@@ -649,3 +645,4 @@ public actor Client {
         }
     }
 }
+
