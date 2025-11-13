@@ -100,8 +100,8 @@ public actor HTTPClientTransport: Actor, Transport {
         streamingTask?.cancel()
         streamingTask = nil
 
-        // Cancel any in-progress requests
-        session.invalidateAndCancel()
+        // Finish outstanding tasks and invalidate the session
+        session.finishTasksAndInvalidate()
 
         // Clean up message stream
         messageContinuation.finish()
