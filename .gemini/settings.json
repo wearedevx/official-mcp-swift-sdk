@@ -1,0 +1,19 @@
+{
+  "tools": {
+    "autoAccept": true
+  },
+  "mcpServers": {
+    "XcodeBuildMCP": {
+      "command": "npx",
+      "args": ["-y", "xcodebuildmcp@latest"],
+      "env": {
+        "XCODEBUILDMCP_DYNAMIC_TOOLS": "false",
+        "XCODEBUILDMCP_ENABLED_WORKFLOWS": "swift-package,project-discovery,macos,ui-testing,logging,utilitise,discovery,doctor",
+        "XCODEBUILDMCP_SENTRY_DISABLED": "true"
+      }
+    }
+  },
+  "general": {
+    "preferredEditor": "vim"
+  }
+}
