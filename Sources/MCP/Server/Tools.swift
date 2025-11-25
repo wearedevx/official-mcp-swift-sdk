@@ -28,6 +28,8 @@ public struct Tool: Hashable, Codable, Sendable {
         case text(String)
         /// Image content
         case image(data: String, mimeType: String, metadata: [String: String]?)
+        /// Audio cotnent
+        case audio(data: String, mimeType: String) ///
         /// Embedded resource content
         case resource(uri: String, mimeType: String, text: String?)
 
@@ -50,20 +52,25 @@ public struct Tool: Hashable, Codable, Sendable {
             case "text":
                 let text = try container.decode(String.self, forKey: .text)
                 self = .text(text)
+
             case "image":
                 let data = try container.decode(String.self, forKey: .data)
                 let mimeType = try container.decode(String.self, forKey: .mimeType)
                 let metadata = try container.decodeIfPresent(
-                    [String: String].self, forKey: .metadata)
+                    [String: String].self, forKey: .metadata
+                )
                 self = .image(data: data, mimeType: mimeType, metadata: metadata)
+
             case "resource":
                 let uri = try container.decode(String.self, forKey: .uri)
                 let mimeType = try container.decode(String.self, forKey: .mimeType)
                 let text = try container.decodeIfPresent(String.self, forKey: .text)
                 self = .resource(uri: uri, mimeType: mimeType, text: text)
+
             default:
                 throw DecodingError.dataCorruptedError(
-                    forKey: .type, in: container, debugDescription: "Unknown tool content type")
+                    forKey: .type, in: container, debugDescription: "Unknown tool content type"
+                )
             }
         }
 
@@ -71,15 +78,22 @@ public struct Tool: Hashable, Codable, Sendable {
             var container = encoder.container(keyedBy: CodingKeys.self)
 
             switch self {
-            case .text(let text):
+            case let .text(text):
                 try container.encode("text", forKey: .type)
                 try container.encode(text, forKey: .text)
-            case .image(let data, let mimeType, let metadata):
+
+            case let .image(data, mimeType, metadata):
                 try container.encode("image", forKey: .type)
                 try container.encode(data, forKey: .data)
                 try container.encode(mimeType, forKey: .mimeType)
                 try container.encodeIfPresent(metadata, forKey: .metadata)
-            case .resource(let uri, let mimeType, let text):
+
+            case let .audio(data, mimeType):
+                try container.encode("audio", forKey: .type)
+                try container.encode(data, forKey: .data)
+                try container.encode(mimeType, forKey: .mimeType)
+
+            case let .resource(uri, mimeType, text):
                 try container.encode("resource", forKey: .type)
                 try container.encode(uri, forKey: .uri)
                 try container.encode(mimeType, forKey: .mimeType)
@@ -120,7 +134,7 @@ public enum ListTools: Method {
 
     public struct Parameters: NotRequired, Hashable, Codable, Sendable {
         public let cursor: String?
-        
+
         public init() {
             self.cursor = nil
         }
