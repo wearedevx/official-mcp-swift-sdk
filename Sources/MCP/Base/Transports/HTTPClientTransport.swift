@@ -236,10 +236,6 @@ public actor HTTPClientTransport: Actor, Transport {
             request.httpMethod = "GET"
             request.addValue("text/event-stream", forHTTPHeaderField: "Accept")
 
-            if let jwt {
-                request.addValue("Bearer \(jwt)", forHTTPHeaderField: "Authorization")
-            }
-
             // Add session ID if available
             if let sessionID {
                 request.addValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
@@ -248,6 +244,12 @@ public actor HTTPClientTransport: Actor, Transport {
             // Add Last-Event-ID header for resumability if available
             if let lastEventID {
                 request.addValue(lastEventID, forHTTPHeaderField: "Last-Event-ID")
+            }
+
+            if let jwt {
+                request.addValue("Bearer \(jwt)", forHTTPHeaderField: "Authorization")
+            } else if let requestModifier {
+                request = requestModifier(request)
             }
 
             logger.debug("Starting SSE connection")
