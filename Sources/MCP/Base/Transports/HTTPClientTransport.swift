@@ -8,7 +8,6 @@ import Logging
 public actor HTTPClientTransport: Actor, Transport {
     public var endpoint: URL
     public var endpointPostURL: URL?
-    private var jwt: String? = ""
     private let session: URLSession
     public private(set) var sessionID: String?
     private let streaming: Bool
@@ -28,8 +27,7 @@ public actor HTTPClientTransport: Actor, Transport {
         streaming: Bool = false,
         requestModifier: (@Sendable (URLRequest) -> URLRequest)? = nil,
         logger: Logger? = nil,
-        endpointCommunication: URL? = nil,
-        jwt: String? = nil
+        endpointCommunication: URL? = nil
     ) {
         self.init(
             endpoint: endpoint,
@@ -37,8 +35,7 @@ public actor HTTPClientTransport: Actor, Transport {
             streaming: streaming,
             requestModifier: requestModifier,
             logger: logger,
-            endpointCommunication: endpointCommunication,
-            jwt: jwt
+            endpointCommunication: endpointCommunication
         )
     }
 
@@ -48,8 +45,7 @@ public actor HTTPClientTransport: Actor, Transport {
         streaming: Bool = false,
         requestModifier: (@Sendable (URLRequest) -> URLRequest)? = nil,
         logger: Logger? = nil,
-        endpointCommunication: URL? = nil,
-        jwt: String? = nil
+        endpointCommunication: URL? = nil
     ) {
         self.endpoint = endpoint
         self.session = session
@@ -68,7 +64,6 @@ public actor HTTPClientTransport: Actor, Transport {
                     factory: { _ in SwiftLogNoOpLogHandler() }
                 )
         self.endpointCommunication = endpointCommunication
-        self.jwt = jwt
     }
 
     /// Establishes connection with the transport
@@ -133,9 +128,6 @@ public actor HTTPClientTransport: Actor, Transport {
             request.addValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
         }
 
-        if let jwt {
-            request.addValue("Bearer \(jwt)", forHTTPHeaderField: "Authorization")
-        }
         if let requestModifier {
             request = requestModifier(request)
         }
@@ -246,9 +238,7 @@ public actor HTTPClientTransport: Actor, Transport {
                 request.addValue(lastEventID, forHTTPHeaderField: "Last-Event-ID")
             }
 
-            if let jwt {
-                request.addValue("Bearer \(jwt)", forHTTPHeaderField: "Authorization")
-            } else if let requestModifier {
+            if let requestModifier {
                 request = requestModifier(request)
             }
 
