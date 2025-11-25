@@ -20,10 +20,13 @@ public actor HTTPClientTransport: Actor, Transport {
     private let messageStream: AsyncThrowingStream<Data, Swift.Error>
     private let messageContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
 
+    private let requestModifier: (@Sendable (URLRequest) -> URLRequest)?
+
     public init(
         endpoint: URL,
         configuration: URLSessionConfiguration = .default,
         streaming: Bool = false,
+        requestModifier: (@Sendable (URLRequest) -> URLRequest)? = nil,
         logger: Logger? = nil,
         endpointCommunication: URL? = nil,
         jwt: String? = nil
@@ -32,6 +35,7 @@ public actor HTTPClientTransport: Actor, Transport {
             endpoint: endpoint,
             session: URLSession(configuration: configuration),
             streaming: streaming,
+            requestModifier: requestModifier,
             logger: logger,
             endpointCommunication: endpointCommunication,
             jwt: jwt
@@ -42,6 +46,7 @@ public actor HTTPClientTransport: Actor, Transport {
         endpoint: URL,
         session: URLSession,
         streaming: Bool = false,
+        requestModifier: (@Sendable (URLRequest) -> URLRequest)? = nil,
         logger: Logger? = nil,
         endpointCommunication: URL? = nil,
         jwt: String? = nil
@@ -49,6 +54,7 @@ public actor HTTPClientTransport: Actor, Transport {
         self.endpoint = endpoint
         self.session = session
         self.streaming = streaming
+        self.requestModifier = requestModifier
 
         // Create message stream
         var continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation!
@@ -120,15 +126,18 @@ public actor HTTPClientTransport: Actor, Transport {
         request.addValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        if let jwt {
-            request.addValue("Bearer \(jwt)", forHTTPHeaderField: "Authorization")
-        }
-
         request.httpBody = data
 
         // Add session ID if available
         if let sessionID {
             request.addValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
+        }
+
+        if let jwt {
+            request.addValue("Bearer \(jwt)", forHTTPHeaderField: "Authorization")
+        }
+        if let requestModifier {
+            request = requestModifier(request)
         }
 
         let (responseData, response) = try await session.data(for: request)
