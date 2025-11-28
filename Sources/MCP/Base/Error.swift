@@ -21,7 +21,7 @@ public enum MCPError: Swift.Error, Sendable {
     // Transport specific errors
     case connectionClosed
     case transportError(Swift.Error)
-    case unauthorized
+    case unauthorized(String?) // WWW-Authenticate header value
 
     /// The JSON-RPC 2.0 error code
     public var code: Int {

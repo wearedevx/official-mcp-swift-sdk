@@ -106,6 +106,16 @@ public actor Client {
     /// The server instructions
     private var instructions: String?
 
+    var isStreamableHTTP: Bool {
+        if let version = serverVersion,
+           connection is HTTPClientTransport || connection is OAuthHTTPClientTransport
+        {
+            version >= "2025-03-26"
+        } else {
+            true // assume streamable if no version is available
+        }
+    }
+
     /// A dictionary of type-erased notification handlers, keyed by method name
     private var notificationHandlers: [String: [NotificationHandlerBox]] = [:]
     /// The task for the message handling loop
@@ -143,7 +153,7 @@ public actor Client {
         init<T: Sendable & Decodable>(_ request: PendingRequest<T>) {
             _resume = { result in
                 switch result {
-                case .success(let value):
+                case let .success(value):
                     if let typedValue = value as? T {
                         request.resume(returning: typedValue)
                     } else if let value = value as? Value,
@@ -154,7 +164,8 @@ public actor Client {
                     } else {
                         request.resume(throwing: TypeMismatchError())
                     }
-                case .failure(let error):
+
+                case let .failure(error):
                     request.resume(throwing: error)
                 }
             }
@@ -178,20 +189,33 @@ public actor Client {
     public init(
         name: String,
         version: String,
+        transport: (any Transport)? = nil,
         configuration: Configuration = .default
     ) {
         clientInfo = Client.Info(name: name, version: version)
         capabilities = Capabilities()
+
+        if let transport {
+            connection = transport
+        }
         self.configuration = configuration
     }
 
     /// Connect to the server using the given transport
-    public func connect(transport: any Transport) async throws {
-        connection = transport
+    public func connect() async throws {
         try await connection?.connect()
 
         await logger?.info(
-            "Client connected", metadata: ["name": "\(name)", "version": "\(version)"])
+            "Client connected", metadata: ["name": "\(name)", "version": "\(version)"]
+        )
+
+        if task == nil || task?.isCancelled == true {
+            listenForSSEMessages()
+        }
+    }
+
+    public func listenForSSEMessages() {
+        task?.cancel()
 
         // Start message handling loop
         task = Task {
@@ -222,7 +246,8 @@ public actor Client {
                             }
                             await logger?.warning(
                                 "Unexpected message received by client (not single/batch response or notification)",
-                                metadata: metadata)
+                                metadata: metadata
+                            )
                         }
                     }
                 } catch let error where MCPError.isResourceTemporarilyUnavailable(error) {
@@ -230,7 +255,8 @@ public actor Client {
                     continue
                 } catch {
                     await logger?.error(
-                        "Error in message handling loop", metadata: ["error": "\(error)"])
+                        "Error in message handling loop", metadata: ["error": "\(error)"]
+                    )
                     break
                 }
             } while true
@@ -247,7 +273,7 @@ public actor Client {
 
         task?.cancel()
         task = nil
-        if let connection = connection {
+        if let connection {
             await connection.disconnect()
         }
         connection = nil
@@ -258,7 +284,7 @@ public actor Client {
     /// Register a handler for a notification
     @discardableResult
     public func onNotification<N: Notification>(
-        _ type: N.Type,
+        _: N.Type,
         handler: @escaping @Sendable (Message<N>) async throws -> Void
     ) async -> Self {
         let handlers = notificationHandlers[N.name, default: []]
@@ -270,7 +296,7 @@ public actor Client {
 
     /// Send a request and receive its response
     public func send<M: Method>(_ request: Request<M>) async throws -> M.Result {
-        guard let connection = connection else {
+        guard let connection else {
             throw MCPError.internalError("Client connection not initialized")
         }
 
@@ -283,7 +309,8 @@ public actor Client {
                 self.addPendingRequest(
                     id: request.id,
                     continuation: continuation,
-                    type: M.Result.self)
+                    type: M.Result.self
+                )
 
                 // Send the request data
                 do {
@@ -307,7 +334,7 @@ public actor Client {
     private func addPendingRequest<T: Sendable & Decodable>(
         id: ID,
         continuation: CheckedContinuation<T, Swift.Error>,
-        type: T.Type // Keep type for AnyPendingRequest internal logic
+        type _: T.Type // Keep type for AnyPendingRequest internal logic
     ) {
         pendingRequests[id] = AnyPendingRequest(PendingRequest(continuation: continuation))
     }
@@ -352,7 +379,8 @@ public actor Client {
                         await client.addPendingRequest(
                             id: request.id,
                             continuation: continuation,
-                            type: M.Result.self)
+                            type: M.Result.self
+                        )
                     }
                 }
             }
@@ -434,7 +462,7 @@ public actor Client {
     /// - Throws: `MCPError.internalError` if the client is not connected.
     ///           Can also rethrow errors from the `body` closure or from sending the batch request.
     public func withBatch(body: @escaping (Batch) async throws -> Void) async throws {
-        guard let connection = connection else {
+        guard let connection else {
             throw MCPError.internalError("Client connection not initialized")
         }
 
@@ -454,7 +482,8 @@ public actor Client {
         }
 
         await logger?.debug(
-            "Sending batch request", metadata: ["count": "\(requests.count)"])
+            "Sending batch request", metadata: ["count": "\(requests.count)"]
+        )
 
         // Encode the array of AnyMethod requests into a single JSON payload
         let data = try encoder.encode(requests)
@@ -470,7 +499,12 @@ public actor Client {
             .init(
                 protocolVersion: Version.latest,
                 capabilities: capabilities,
-                clientInfo: clientInfo))
+                clientInfo: clientInfo
+            ))
+
+        if connection is HTTPClientTransport || connection is OAuthHTTPClientTransport {
+            listenForSSEMessages()
+        }
 
         let result = try await send(request)
 
@@ -481,9 +515,21 @@ public actor Client {
         return result
     }
 
+    public func updateTransport(newTransport: (any Transport)?) {
+        connection = newTransport
+    }
+
     public func ping() async throws {
         let request = Ping.request()
+
+        if isStreamableHTTP {
+            listenForSSEMessages()
+        }
         _ = try await send(request)
+
+        if !isStreamableHTTP {
+            task?.cancel()
+        }
     }
 
     // MARK: - Prompts
@@ -501,11 +547,10 @@ public actor Client {
         -> (prompts: [Prompt], nextCursor: String?)
     {
         try validateServerCapability(\.prompts, "Prompts")
-        let request: Request<ListPrompts>
-        if let cursor = cursor {
-            request = ListPrompts.request(.init(cursor: cursor))
+        let request: Request<ListPrompts> = if let cursor {
+            ListPrompts.request(.init(cursor: cursor))
         } else {
-            request = ListPrompts.request(.init())
+            ListPrompts.request(.init())
         }
         let result = try await send(request)
         return (prompts: result.prompts, nextCursor: result.nextCursor)
@@ -524,11 +569,10 @@ public actor Client {
         resources: [Resource], nextCursor: String?
     ) {
         try validateServerCapability(\.resources, "Resources")
-        let request: Request<ListResources>
-        if let cursor = cursor {
-            request = ListResources.request(.init(cursor: cursor))
+        let request: Request<ListResources> = if let cursor {
+            ListResources.request(.init(cursor: cursor))
         } else {
-            request = ListResources.request(.init())
+            ListResources.request(.init())
         }
         let result = try await send(request)
         return (resources: result.resources, nextCursor: result.nextCursor)
@@ -546,11 +590,10 @@ public actor Client {
         tools: [Tool], nextCursor: String?
     ) {
         try validateServerCapability(\.tools, "Tools")
-        let request: Request<ListTools>
-        if let cursor = cursor {
-            request = ListTools.request(.init(cursor: cursor))
+        let request: Request<ListTools> = if let cursor {
+            ListTools.request(.init(cursor: cursor))
         } else {
-            request = ListTools.request(.init())
+            ListTools.request(.init())
         }
         let result = try await send(request)
         return (tools: result.tools, nextCursor: result.nextCursor)
@@ -572,15 +615,16 @@ public actor Client {
     {
         await logger?.debug(
             "Processing response",
-            metadata: ["id": "\(response.id)"])
+            metadata: ["id": "\(response.id)"]
+        )
 
         // Remove first to prevent any subsequent lookup from seeing it.
         removePendingRequest(id: response.id)
 
         switch response.result {
-        case .success(let value):
+        case let .success(value):
             request.resume(returning: value)
-        case .failure(let error):
+        case let .failure(error):
             request.resume(throwing: error)
         }
     }
@@ -588,7 +632,8 @@ public actor Client {
     private func handleMessage(_ message: Message<AnyNotification>) async {
         await logger?.debug(
             "Processing notification",
-            metadata: ["method": "\(message.method)"])
+            metadata: ["method": "\(message.method)"]
+        )
 
         // Find notification handlers for this method
         guard let handlers = notificationHandlers[message.method] else { return }
@@ -602,8 +647,9 @@ public actor Client {
                     "Error handling notification",
                     metadata: [
                         "method": "\(message.method)",
-                        "error": "\(error)",
-                    ])
+                        "error": "\(error)"
+                    ]
+                )
             }
         }
     }
@@ -612,8 +658,8 @@ public actor Client {
 
     /// Validate the server capabilities.
     /// Throws an error if the client is configured to be strict and the capability is not supported.
-    private func validateServerCapability<T>(
-        _ keyPath: KeyPath<Server.Capabilities, T?>,
+    private func validateServerCapability(
+        _ keyPath: KeyPath<Server.Capabilities, (some Any)?>,
         _ name: String
     )
         throws
@@ -640,9 +686,9 @@ public actor Client {
                 // Log if a response ID doesn't match any pending request
                 await logger?.warning(
                     "Received response in batch for unknown request ID",
-                    metadata: ["id": "\(response.id)"])
+                    metadata: ["id": "\(response.id)"]
+                )
             }
         }
     }
 }
-

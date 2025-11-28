@@ -19,13 +19,15 @@ public actor HTTPClientTransport: Actor, Transport {
     private let messageStream: AsyncThrowingStream<Data, Swift.Error>
     private let messageContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
 
-    private let requestModifier: (@Sendable (URLRequest) -> URLRequest)?
+    private var eventListeningError: Error?
+
+    private let requestModifier: (@Sendable (URLRequest) async -> URLRequest)?
 
     public init(
         endpoint: URL,
         configuration: URLSessionConfiguration = .default,
         streaming: Bool = false,
-        requestModifier: (@Sendable (URLRequest) -> URLRequest)? = nil,
+        requestModifier: (@Sendable (URLRequest) async -> URLRequest)? = nil,
         logger: Logger? = nil,
         endpointCommunication: URL? = nil
     ) {
@@ -43,7 +45,7 @@ public actor HTTPClientTransport: Actor, Transport {
         endpoint: URL,
         session: URLSession,
         streaming: Bool = false,
-        requestModifier: (@Sendable (URLRequest) -> URLRequest)? = nil,
+        requestModifier: (@Sendable (URLRequest) async -> URLRequest)? = nil,
         logger: Logger? = nil,
         endpointCommunication: URL? = nil
     ) {
@@ -51,6 +53,7 @@ public actor HTTPClientTransport: Actor, Transport {
         self.session = session
         self.streaming = streaming
         self.requestModifier = requestModifier
+        eventListeningError = nil
 
         // Create message stream
         var continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation!
@@ -68,12 +71,14 @@ public actor HTTPClientTransport: Actor, Transport {
 
     /// Establishes connection with the transport
     public func connect() async throws {
+        eventListeningError = nil
+
         guard !isConnected else { return }
         isConnected = true
 
         if streaming {
             // Start listening to server events
-            streamingTask = Task { await startListeningForServerEvents() }
+            streamingTask = Task.detached { await self.startListeningForServerEvents() }
         }
 
         // wait for the connection to happen with a valid endpoint
@@ -81,12 +86,17 @@ public actor HTTPClientTransport: Actor, Transport {
         let sleepIntervalNs: UInt64 = 50_000_000 // 50 ms
         var elapsedNs: UInt64 = 0
 
-        while endpointPostURL == nil {
+        while endpointPostURL == nil, eventListeningError == nil {
             if elapsedNs >= timeoutNs {
                 throw MCPError.internalError("Timeout waiting for valid endpoint from SSE")
             }
             try await Task.sleep(nanoseconds: sleepIntervalNs)
             elapsedNs += sleepIntervalNs
+        }
+
+        if let eventListeningError {
+            logger.error("HTTP transport failed to connect: \(eventListeningError.localizedDescription)")
+            throw eventListeningError
         }
 
         logger.info("HTTP transport connected")
@@ -112,10 +122,6 @@ public actor HTTPClientTransport: Actor, Transport {
 
     /// Sends data through an HTTP POST request
     public func send(_ data: Data) async throws {
-        guard isConnected else {
-            throw MCPError.internalError("Transport not connected")
-        }
-
         var request = URLRequest(url: endpointPostURL ?? endpoint)
         request.httpMethod = "POST"
         request.addValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
@@ -129,10 +135,19 @@ public actor HTTPClientTransport: Actor, Transport {
         }
 
         if let requestModifier {
-            request = requestModifier(request)
+            request = await requestModifier(request)
         }
 
-        let (responseData, response) = try await session.data(for: request)
+        let repr = """
+        \(request.httpMethod ?? "") \(request.url?.absoluteString ?? "<no url>")
+        \(request.allHTTPHeaderFields?.map { "\($0.0): \($0.1)" }.joined(separator: "\n") ?? "")
+        
+        \(String(data: data, encoding: .utf8) ?? "<no-data>")
+        """
+
+        logger.info("SENDING: \(repr)")
+
+        let (stream, response) = try await session.bytes(for: request)
 
         guard let httpResponse = response as? HTTPURLResponse else {
             throw MCPError.internalError("Invalid HTTP response")
@@ -147,21 +162,34 @@ public actor HTTPClientTransport: Actor, Transport {
             logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
         }
 
+
         // Handle different response types
         switch httpResponse.statusCode {
         case 200, 201, 202:
             // For SSE, the processing happens in the streaming task
             if contentType.contains("text/event-stream") {
                 logger.debug("Received SSE response, processing in streaming task")
-                // The streaming is handled by the SSE task if active
+
+                try await decodeSSEStream(stream) { message in
+                    self.messageContinuation.yield(message)
+                }
                 return
             }
 
             // For JSON responses, deliver the data directly
-            if contentType.contains("application/json"), !responseData.isEmpty {
-                logger.debug("Received JSON response", metadata: ["size": "\(responseData.count)"])
-                messageContinuation.yield(responseData)
+            if contentType.contains("application/json") {
+                var data = Data()
+                for try await byte in stream {
+                    data.append(byte)
+                }
+
+                logger.debug("Received JSON response", metadata: ["size": "\(data.count)"])
+                messageContinuation.yield(data)
             }
+
+        case 401:
+            let wwwAuthenticate = httpResponse.value(forHTTPHeaderField: "WWW-Authenticate")
+            throw MCPError.unauthorized(wwwAuthenticate)
 
         case 404:
             // If we get a 404 with a session ID, it means our session is invalid
@@ -170,7 +198,10 @@ public actor HTTPClientTransport: Actor, Transport {
                 sessionID = nil
                 throw MCPError.internalError("Session expired")
             }
-            throw MCPError.internalError("Endpoint not found")
+            throw MCPError.invalidRequest("Endpoint not found")
+
+        case 405:
+            throw MCPError.methodNotFound("Method not found")
 
         default:
             throw MCPError.internalError("HTTP error: \(httpResponse.statusCode)")
@@ -201,8 +232,10 @@ public actor HTTPClientTransport: Actor, Transport {
                 try await connectToEventStream()
             } catch let MCPError.invalidParams(error) {
                 logger.error("Invalid connection parameters: \(error ?? "unknow")")
+                self.eventListeningError = MCPError.invalidParams(error)
                 break
-            } catch MCPError.unauthorized {
+            } catch MCPError.unauthorized(let wwwAuthenticateHeader) {
+                eventListeningError = MCPError.unauthorized(wwwAuthenticateHeader)
                 logger.error("Unauthorized")
                 break
             } catch {
@@ -227,6 +260,7 @@ public actor HTTPClientTransport: Actor, Transport {
             var request = URLRequest(url: endpoint)
             request.httpMethod = "GET"
             request.addValue("text/event-stream", forHTTPHeaderField: "Accept")
+            request.addValue("2025-11-25", forHTTPHeaderField: "MCP-Protocol-Version")
 
             // Add session ID if available
             if let sessionID {
@@ -239,7 +273,7 @@ public actor HTTPClientTransport: Actor, Transport {
             }
 
             if let requestModifier {
-                request = requestModifier(request)
+                request = await requestModifier(request)
             }
 
             logger.debug("Starting SSE connection")
@@ -251,12 +285,28 @@ public actor HTTPClientTransport: Actor, Transport {
                 throw MCPError.internalError("Invalid HTTP response")
             }
 
+            var data = Data()
+            for try await byte in stream {
+                data.append(byte)
+            }
+            let rawBody = String(data: data, encoding: .utf8) ?? ""
+
             switch httpResponse.statusCode {
             case 200: break
+
             case 400:
+                endpointPostURL = endpoint
+                logger.error("MCP Connection invalid params BODY: \(rawBody)")
                 throw MCPError.invalidParams("Invalid parameters provided")
+
             case 401:
-                throw MCPError.unauthorized
+                let wwwAuthenticateHeader = httpResponse.value(forHTTPHeaderField: "WWW-Authenticate")
+                throw MCPError.unauthorized(wwwAuthenticateHeader)
+
+            case 404:
+                logger.error("MCP Connection Endpoint not found BODY: \(rawBody)")
+                throw MCPError.internalError("Endpoint not found")
+
             default:
                 throw MCPError.internalError("HTTP error: \(httpResponse.statusCode)")
             }
@@ -267,117 +317,123 @@ public actor HTTPClientTransport: Actor, Transport {
             }
 
             // Process the SSE stream
-            var buffer: [UInt8] = []
-            var eventType = ""
-            var eventID: String?
-            var eventData = ""
+            try await decodeSSEStream(stream) { message in
+                self.messageContinuation.yield(message)
+            }
+        }
+    #endif
 
-            for try await byte in stream {
-                if Task.isCancelled { break }
+    private func decodeSSEStream(_ stream: URLSession.AsyncBytes, handleMessage: @escaping @Sendable (Data) -> Void) async throws {
+        var buffer: [UInt8] = []
+        var eventType = ""
+        var eventID: String?
+        var eventData = ""
 
-                buffer.append(byte)
+        for try await byte in stream {
+            if Task.isCancelled { break }
 
-                if String(bytes: [byte], encoding: .utf8) == "\n" {
-                    // Process complete lines
-                    Task(priority: .userInitiated) {
-                        guard let lines = String(bytes: buffer, encoding: .utf8)
-                        else {
-                            buffer.removeAll()
-                            return
-                        }
+            buffer.append(byte)
+
+            if String(bytes: [byte], encoding: .utf8) == "\n" {
+                // Process complete lines
+                Task(priority: .userInitiated) {
+                    guard let lines = String(bytes: buffer, encoding: .utf8)
+                    else {
                         buffer.removeAll()
+                        return
+                    }
+                    buffer.removeAll()
 
-                        for line in lines.split(separator: "\n", omittingEmptySubsequences: false) {
-                            // Empty line marks the end of an event
-                            if line.isEmpty || line == "\r" || line == "\n" || line == "\r\n" {
-                                if !eventData.isEmpty {
-                                    // Process the event
-                                    if eventType == "id" {
-                                        lastEventID = eventID
-                                    } else if eventType == "endpoint" {
-                                        if let endpointCommunication {
-                                            if let newEndpoint = URL(string: "\(endpointCommunication.absoluteString)\(eventData)") {
-                                                endpointPostURL = newEndpoint
-                                                logger.info("Received new endpoint via SSE with endpointCommunication: \(newEndpoint.absoluteString)")
-                                            } else {
-                                                logger.error("Failed to construct new endpoint URL from SSE data: \(eventData)")
-                                            }
-                                        } else if let scheme = endpoint.scheme, let host = endpoint.host {
-                                            // Construct the new endpoint URL using the original scheme and host
-                                            let portString = endpoint.port.map { ":\($0)" } ?? ""
-                                            if let newEndpoint = URL(string: "\(scheme)://\(host)\(portString)\(eventData)") {
-                                                endpointPostURL = newEndpoint
-                                                logger.info("Received new endpoint via SSE: \(newEndpoint.absoluteString)")
-                                            } else {
-                                                logger.error("Failed to construct new endpoint URL from SSE data: \(eventData)")
-                                            }
+                    for line in lines.split(separator: "\n", omittingEmptySubsequences: false) {
+                        // Empty line marks the end of an event
+                        if line.isEmpty || line == "\r" || line == "\n" || line == "\r\n" {
+                            if !eventData.isEmpty {
+                                // Process the event
+                                if eventType == "id" {
+                                    lastEventID = eventID
+                                } else if eventType == "endpoint" {
+                                    if let endpointCommunication {
+                                        if let newEndpoint = URL(string: "\(endpointCommunication.absoluteString)\(eventData)") {
+                                            endpointPostURL = newEndpoint
+                                            logger.info("Received new endpoint via SSE with endpointCommunication: \(newEndpoint.absoluteString)")
                                         } else {
-                                            logger.error("Original endpoint is missing scheme or host, cannot construct new endpoint.")
+                                            logger.error("Failed to construct new endpoint URL from SSE data: \(eventData)")
+                                        }
+                                    } else if let scheme = endpoint.scheme, let host = endpoint.host {
+                                        // Construct the new endpoint URL using the original scheme and host
+                                        let portString = endpoint.port.map { ":\($0)" } ?? ""
+                                        if let newEndpoint = URL(string: "\(scheme)://\(host)\(portString)\(eventData)") {
+                                            endpointPostURL = newEndpoint
+                                            logger.info("Received new endpoint via SSE: \(newEndpoint.absoluteString)")
+                                        } else {
+                                            logger.error("Failed to construct new endpoint URL from SSE data: \(eventData)")
                                         }
                                     } else {
-                                        // Default event type is "message" if not specified
-                                        if let data = eventData.data(using: .utf8) {
-                                            logger.debug(
-                                                "SSE event received",
-                                                metadata: [
-                                                    "type": "\(eventType.isEmpty ? "message" : eventType)",
-                                                    "id": "\(eventID ?? "none")",
-                                                ]
-                                            )
-                                            messageContinuation.yield(data)
-                                        }
+                                        logger.error("Original endpoint is missing scheme or host, cannot construct new endpoint.")
                                     }
-
-                                    // Reset for next event
-                                    eventType = ""
-                                    eventData = ""
+                                } else {
+                                    // Default event type is "message" if not specified
+                                    if let data = eventData.data(using: .utf8) {
+                                        logger.debug(
+                                            "SSE event received",
+                                            metadata: [
+                                                "type": "\(eventType.isEmpty ? "message" : eventType)",
+                                                "id": "\(eventID ?? "none")"
+                                            ]
+                                        )
+                                        handleMessage(data)
+                                    }
                                 }
-                                return
+
+                                // Reset for next event
+                                eventType = ""
+                                eventData = ""
+                            }
+                            return
+                        }
+
+                        // Lines starting with ":" are comments
+                        if line.hasPrefix(":") { return }
+
+                        // Parse field: value format
+                        if let colonIndex = line.firstIndex(of: ":") {
+                            let field = String(line[..<colonIndex])
+                            var value = String(line[line.index(after: colonIndex)...])
+
+                            // Trim leading space
+                            if value.hasPrefix(" ") {
+                                value = String(value.dropFirst())
                             }
 
-                            // Lines starting with ":" are comments
-                            if line.hasPrefix(":") { return }
+                            // Process based on field
+                            switch field {
+                            case "event":
+                                eventType = value
 
-                            // Parse field: value format
-                            if let colonIndex = line.firstIndex(of: ":") {
-                                let field = String(line[..<colonIndex])
-                                var value = String(line[line.index(after: colonIndex)...])
+                            case "data":
+                                if !eventData.isEmpty {
+                                    eventData.append("\n")
+                                }
+                                eventData.append(value)
 
-                                // Trim leading space
-                                if value.hasPrefix(" ") {
-                                    value = String(value.dropFirst())
+                            case "id":
+                                if !value.contains("\0") { // ID must not contain NULL
+                                    eventID = value
+                                    lastEventID = value
                                 }
 
-                                // Process based on field
-                                switch field {
-                                case "event":
-                                    eventType = value
+                            case "retry":
+                                // Retry timing not implemented
+                                break
 
-                                case "data":
-                                    if !eventData.isEmpty {
-                                        eventData.append("\n")
-                                    }
-                                    eventData.append(value)
-
-                                case "id":
-                                    if !value.contains("\0") { // ID must not contain NULL
-                                        eventID = value
-                                        lastEventID = value
-                                    }
-
-                                case "retry":
-                                    // Retry timing not implemented
-                                    break
-
-                                default:
-                                    // Unknown fields are ignored per SSE spec
-                                    break
-                                }
+                            default:
+                                // Unknown fields are ignored per SSE spec
+                                break
                             }
                         }
                     }
                 }
             }
         }
-    #endif
+    }
 }

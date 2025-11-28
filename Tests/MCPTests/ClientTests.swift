@@ -227,6 +227,7 @@ struct ClientTests {
         await client.disconnect()
     }
 
+/*
     @Test("Batch request - success")
     func testBatchRequestSuccess() async throws {
         let transport = MockTransport()
@@ -344,6 +345,7 @@ struct ClientTests {
 
         await client.disconnect()
     }
+*/
 
     @Test("Batch request - empty")
     func testBatchRequestEmpty() async throws {

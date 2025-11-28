@@ -399,7 +399,7 @@ public actor OAuthAuthenticator {
         // Priority 1: OAuth 2.0 Authorization Server Metadata
         if let domain = issuerURL.host,
            let scheme = issuerURL.scheme,
-           let oauthURL = URL(string: "\(scheme)://\(domain)/.well-known/oauth-authorization-server")
+           let portString = issuerURL.port.map { ":\($0)" } ?? "", let oauthURL = URL(string: "\(scheme)://\(domain)\(portString)/.well-known/oauth-authorization-server")
         {
             discoveryURLs.append(oauthURL)
         }

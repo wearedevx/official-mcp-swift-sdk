@@ -7,5 +7,5 @@ import Foundation
 /// - SeeAlso: https://spec.modelcontextprotocol.io/specification/2024-11-05/basic/versioning/
 public enum Version {
     /// The current protocol version.
-    public static let latest = "2024-11-05"
+    public static let latest = "2025-03-26"
 }
