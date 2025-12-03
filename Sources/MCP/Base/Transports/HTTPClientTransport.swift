@@ -16,8 +16,11 @@ public actor HTTPClientTransport: Actor, Transport {
     public nonisolated let logger: Logger
     public var endpointCommunication: URL?
     private var isConnected = false
-    private let messageStream: AsyncThrowingStream<Data, Swift.Error>
-    private let messageContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
+    // Streaming (SSE) mode uses a long-lived stream
+    private var sseMessageStream: AsyncThrowingStream<Data, Swift.Error>?
+    private var sseMessageContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation?
+    // Non-streaming mode: queue of pending continuations for each request/response pair
+    private var pendingContinuations: [AsyncThrowingStream<Data, Swift.Error>.Continuation] = []
 
     private var eventListeningError: Error?
 
@@ -56,16 +59,20 @@ public actor HTTPClientTransport: Actor, Transport {
         eventListeningError = nil
 
         // Create message stream
-        var continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation!
-        messageStream = AsyncThrowingStream { continuation = $0 }
-        messageContinuation = continuation
+        // Initialise SSE stream only if streaming is enabled
+        if streaming {
+            var continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation!
+            let stream = AsyncThrowingStream { continuation = $0 }
+            sseMessageStream = stream
+            sseMessageContinuation = continuation
+        }
 
         self.logger =
             logger
-                ?? Logger(
-                    label: "mcp.transport.http.client",
-                    factory: { _ in SwiftLogNoOpLogHandler() }
-                )
+            ?? Logger(
+                label: "mcp.transport.http.client",
+                factory: { _ in SwiftLogNoOpLogHandler() }
+            )
         self.endpointCommunication = endpointCommunication
     }
 
@@ -82,8 +89,8 @@ public actor HTTPClientTransport: Actor, Transport {
         }
 
         // wait for the connection to happen with a valid endpoint
-        let timeoutNs = 45_000_000_000 // 45 seconds
-        let sleepIntervalNs: UInt64 = 50_000_000 // 50 ms
+        let timeoutNs = 45_000_000_000  // 45 seconds
+        let sleepIntervalNs: UInt64 = 50_000_000  // 50 ms
         var elapsedNs: UInt64 = 0
 
         while endpointPostURL == nil, eventListeningError == nil {
@@ -115,8 +122,12 @@ public actor HTTPClientTransport: Actor, Transport {
         // Finish outstanding tasks and invalidate the session
         session.finishTasksAndInvalidate()
 
-        // Clean up message stream
-        messageContinuation.finish()
+        // Clean up streaming SSE continuation and any pending non‑streaming continuations
+        sseMessageContinuation?.finish()
+        for cont in pendingContinuations {
+            cont.finish()
+        }
+        pendingContinuations.removeAll()
 
         logger.info("HTTP clienttransport disconnected")
     }
@@ -140,11 +151,11 @@ public actor HTTPClientTransport: Actor, Transport {
         }
 
         let repr = """
-        \(request.httpMethod ?? "") \(request.url?.absoluteString ?? "<no url>")
-        \(request.allHTTPHeaderFields?.map { "\($0.0): \($0.1)" }.joined(separator: "\n") ?? "")
+            \(request.httpMethod ?? "") \(request.url?.absoluteString ?? "<no url>")
+            \(request.allHTTPHeaderFields?.map { "\($0.0): \($0.1)" }.joined(separator: "\n") ?? "")
 
-        \(String(data: data, encoding: .utf8) ?? "<no-data>")
-        """
+            \(String(data: data, encoding: .utf8) ?? "<no-data>")
+            """
 
         logger.info("SENDING: \(repr)")
 
@@ -167,25 +178,39 @@ public actor HTTPClientTransport: Actor, Transport {
         switch httpResponse.statusCode {
         case 200, 201, 202:
             // For SSE, the processing happens in the streaming task
-            if contentType.contains("text/event-stream") {
+            // SSE (streaming) response handling
+            if streaming && contentType.contains("text/event-stream") {
                 logger.info("Received SSE response, processing in streaming task")
-
+                // Capture continuation locally to avoid actor isolation issues
+                let continuation = self.sseMessageContinuation
                 try await decodeSSEStream(stream) { message in
-                    self.logger.info("Received Streamed message \(String(data: message, encoding: .utf8) ?? "<binary data>")")
-                    self.messageContinuation.yield(message)
+                    self.logger.info(
+                        "Received Streamed message \(String(data: message, encoding: .utf8) ?? "<binary data>")"
+                    )
+                    continuation?.yield(message)
+                    // Do NOT finish; keep stream alive for further events
                 }
                 return
             }
 
-            // For JSON responses, deliver the data directly
+            // JSON response handling (both streaming and non‑streaming)
             if contentType.contains("application/json") {
                 var data = Data()
                 for try await byte in stream {
                     data.append(byte)
                 }
-
                 logger.info("Received JSON response", metadata: ["size": "\(data.count)"])
-                messageContinuation.yield(data)
+                if streaming {
+                    // Forward via SSE stream continuation
+                    self.sseMessageContinuation?.yield(data)
+                } else {
+                    // Deliver to the pending continuation for this request
+                    if let cont = pendingContinuations.first {
+                        cont.yield(data)
+                        cont.finish()
+                        pendingContinuations.removeFirst()
+                    }
+                }
             }
 
         case 401:
@@ -211,7 +236,15 @@ public actor HTTPClientTransport: Actor, Transport {
 
     /// Receives data in an async sequence
     public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
-        messageStream
+        if streaming {
+            // Return the long‑lived SSE stream
+            return sseMessageStream!
+        } else {
+            // Create a fresh stream for this request/response pair
+            let (stream, continuation) = AsyncThrowingStream<Data, Swift.Error>.makeStream()
+            pendingContinuations.append(continuation)
+            return stream
+        }
     }
 
     // MARK: - SSE
@@ -240,7 +273,7 @@ public actor HTTPClientTransport: Actor, Transport {
                 if !Task.isCancelled {
                     logger.error("SSE connection error: \(error)")
                     // Wait before retrying
-                    try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)  // 1 second
                 }
             }
         }
@@ -325,8 +358,10 @@ public actor HTTPClientTransport: Actor, Transport {
             }
 
             // Process the SSE stream
+            // Capture continuation locally for actor safety
+            let continuation = self.sseMessageContinuation
             try await decodeSSEStream(stream) { message in
-                self.messageContinuation.yield(message)
+                continuation?.yield(message)
             }
         }
     #endif
@@ -365,7 +400,7 @@ public actor HTTPClientTransport: Actor, Transport {
                                     if let endpointCommunication {
                                         if let newEndpoint = URL(
                                             string:
-                                            "\(endpointCommunication.absoluteString)\(eventData)"
+                                                "\(endpointCommunication.absoluteString)\(eventData)"
                                         ) {
                                             endpointPostURL = newEndpoint
                                             logger.info(
@@ -376,7 +411,8 @@ public actor HTTPClientTransport: Actor, Transport {
                                                 "Failed to construct new endpoint URL from SSE data: \(eventData)"
                                             )
                                         }
-                                    } else if let scheme = endpoint.scheme, let host = endpoint.host {
+                                    } else if let scheme = endpoint.scheme, let host = endpoint.host
+                                    {
                                         // Construct the new endpoint URL using the original scheme and host
                                         let portString = endpoint.port.map { ":\($0)" } ?? ""
                                         if let newEndpoint = URL(
@@ -443,7 +479,7 @@ public actor HTTPClientTransport: Actor, Transport {
                                 eventData.append(value)
 
                             case "id":
-                                if !value.contains("\0") { // ID must not contain NULL
+                                if !value.contains("\0") {  // ID must not contain NULL
                                     eventID = value
                                     lastEventID = value
                                 }
