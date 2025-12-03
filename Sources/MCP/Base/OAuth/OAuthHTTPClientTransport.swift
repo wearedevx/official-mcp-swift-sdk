@@ -30,7 +30,7 @@ public actor OAuthHTTPClientTransport: Transport {
     private let sessionConfiguration: URLSessionConfiguration
 
     /// Whether streaming is enabled
-    private let streaming: Bool
+    public var streaming: Bool
 
     /// Whether the transport has been explicitly connected
     private var isConnected = false
@@ -146,6 +146,33 @@ public actor OAuthHTTPClientTransport: Transport {
         )
     }
 
+    // Copy transport with new parameters
+    public static func from(_ other: OAuthHTTPClientTransport,
+                       endpoint: URL? = nil,
+                       oauthConfig: OAuthConfiguration? = nil,
+                       tokenStorage: TokenStorage? = nil,
+                       tokenIdentifier: String? = nil,
+                       configuration: URLSessionConfiguration? = nil,
+                       streaming: Bool? = nil,
+                       logger: Logger? = nil
+    ) async -> Self {
+        let otherOauthConfig = await other.authenticator.configuration
+        let otherTokenStorage = await other.authenticator.tokenStorage
+        let otherStreaming = await other.streaming
+
+        return await Self.init(
+            endpoint: endpoint ?? other.endpoint,
+            oauthConfig: oauthConfig ?? otherOauthConfig,
+            tokenStorage: tokenStorage ?? otherTokenStorage,
+            tokenIdentifier: tokenIdentifier ?? other.tokenIdentifier,
+            configuration: configuration ?? other.sessionConfiguration,
+            streaming: streaming ?? otherStreaming,
+            logger: logger ?? other.logger
+        )
+
+
+    }
+
     /// Creates or updates the base transport with current OAuth token
     private func updateBaseTransport(with token: OAuthToken) {
         // Create a new configuration with OAuth headers
@@ -253,9 +280,15 @@ public actor OAuthHTTPClientTransport: Transport {
         }
     }
 
+    private var currentStream: AsyncThrowingStream<Data, Swift.Error>? = nil
+
     /// Receives data from the transport
     public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
-        AsyncThrowingStream { continuation in
+        if let currentStream {
+            return currentStream
+        }
+
+        self.currentStream = AsyncThrowingStream { continuation in
             Task {
                 do {
                     // Delegate to base transport - SSE will have OAuth headers via URLSession configuration
@@ -268,6 +301,8 @@ public actor OAuthHTTPClientTransport: Transport {
                 }
             }
         }
+
+        return currentStream!
     }
 
     // MARK: - Private Methods

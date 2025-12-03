@@ -106,7 +106,7 @@ public actor Client {
     /// The server instructions
     private var instructions: String?
 
-    var isStreamableHTTP: Bool {
+    public var isStreamableHTTP: Bool {
         if let version = serverVersion,
            connection is HTTPClientTransport || connection is OAuthHTTPClientTransport
         {
@@ -208,13 +208,9 @@ public actor Client {
         await logger?.info(
             "Client connected", metadata: ["name": "\(name)", "version": "\(version)"]
         )
-
-        if task == nil || task?.isCancelled == true {
-            listenForSSEMessages()
-        }
     }
 
-    public func listenForSSEMessages() {
+    public func listenForMessages() {
         task?.cancel()
 
         // Start message handling loop
@@ -502,9 +498,7 @@ public actor Client {
                 clientInfo: clientInfo
             ))
 
-        if connection is HTTPClientTransport || connection is OAuthHTTPClientTransport {
-            listenForSSEMessages()
-        }
+        listenForMessages()
 
         let result = try await send(request)
 
@@ -523,7 +517,7 @@ public actor Client {
         let request = Ping.request()
 
         if isStreamableHTTP {
-            listenForSSEMessages()
+            listenForMessages()
         }
         _ = try await send(request)
 
@@ -647,7 +641,7 @@ public actor Client {
                     "Error handling notification",
                     metadata: [
                         "method": "\(message.method)",
-                        "error": "\(error)"
+                        "error": "\(error)",
                     ]
                 )
             }

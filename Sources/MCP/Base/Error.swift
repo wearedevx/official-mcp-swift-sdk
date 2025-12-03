@@ -14,7 +14,6 @@ public enum MCPError: Swift.Error, Sendable {
     case methodNotFound(String?) // -32601
     case invalidParams(String?) // -32602
     case internalError(String?) // -32603
-
     // Server errors (-32000 to -32099)
     case serverError(code: Int, message: String)
 
@@ -22,6 +21,7 @@ public enum MCPError: Swift.Error, Sendable {
     case connectionClosed
     case transportError(Swift.Error)
     case unauthorized(String?) // WWW-Authenticate header value
+    case unsupportedMethod
 
     /// The JSON-RPC 2.0 error code
     public var code: Int {
@@ -31,10 +31,11 @@ public enum MCPError: Swift.Error, Sendable {
         case .methodNotFound: return -32601
         case .invalidParams: return -32602
         case .internalError: return -32603
-        case .serverError(let code, _): return code
+        case let .serverError(code, _): return code
         case .connectionClosed: return -32000
         case .transportError: return -32001
         case .unauthorized: return -32002
+        case .unsupportedMethod: return -32003
         }
     }
 
@@ -58,24 +59,26 @@ public enum MCPError: Swift.Error, Sendable {
 extension MCPError: LocalizedError {
     public var errorDescription: String? {
         switch self {
-        case .parseError(let detail):
+        case let .parseError(detail):
             return "Parse error: Invalid JSON" + (detail.map { ": \($0)" } ?? "")
-        case .invalidRequest(let detail):
+        case let .invalidRequest(detail):
             return "Invalid Request" + (detail.map { ": \($0)" } ?? "")
-        case .methodNotFound(let detail):
+        case let .methodNotFound(detail):
             return "Method not found" + (detail.map { ": \($0)" } ?? "")
-        case .invalidParams(let detail):
+        case let .invalidParams(detail):
             return "Invalid params" + (detail.map { ": \($0)" } ?? "")
-        case .internalError(let detail):
+        case let .internalError(detail):
             return "Internal error" + (detail.map { ": \($0)" } ?? "")
-        case .serverError(_, let message):
+        case let .serverError(_, message):
             return "Server error: \(message)"
         case .connectionClosed:
             return "Connection closed"
-        case .transportError(let error):
+        case let .transportError(error):
             return "Transport error: \(error.localizedDescription)"
         case .unauthorized:
             return "Unauthorized"
+        case .unsupportedMethod:
+            return "Unsupported method"
         }
     }
 
@@ -95,10 +98,12 @@ extension MCPError: LocalizedError {
             return "Server-defined error occurred"
         case .connectionClosed:
             return "The connection to the server was closed"
-        case .transportError(let error):
+        case let .transportError(error):
             return (error as? LocalizedError)?.failureReason ?? error.localizedDescription
         case .unauthorized:
             return "Unauthorized"
+        case .unsupportedMethod:
+            return "Unsupported method"
         }
     }
 
@@ -125,7 +130,7 @@ extension MCPError: LocalizedError {
 extension MCPError: CustomDebugStringConvertible {
     public var debugDescription: String {
         switch self {
-        case .transportError(let error):
+        case let .transportError(error):
             return
                 "[\(code)] \(errorDescription ?? "") (Underlying error: \(String(reflecting: error)))"
         default:
@@ -148,20 +153,20 @@ extension MCPError: Codable {
 
         // Encode additional data if available
         switch self {
-        case .parseError(let detail),
-             .invalidRequest(let detail),
-             .methodNotFound(let detail),
-             .invalidParams(let detail),
-             .internalError(let detail):
+        case let .parseError(detail),
+             let .invalidRequest(detail),
+             let .methodNotFound(detail),
+             let .invalidParams(detail),
+             let .internalError(detail):
             if let detail = detail {
                 try container.encode(["detail": detail], forKey: .data)
             }
-        case .serverError, .unauthorized:
+        case .serverError, .unauthorized, .unsupportedMethod:
             // No additional data for server errors
             break
         case .connectionClosed:
             break
-        case .transportError(let error):
+        case let .transportError(error):
             try container.encode(
                 ["error": error.localizedDescription],
                 forKey: .data
@@ -178,7 +183,7 @@ extension MCPError: Codable {
         // Helper to extract detail from data, falling back to message if needed
         let unwrapDetail: (String?) -> String? = { fallback in
             guard let detailValue = data?["detail"] else { return fallback }
-            if case .string(let str) = detailValue { return str }
+            if case let .string(str) = detailValue { return str }
             return fallback
         }
 
@@ -199,7 +204,7 @@ extension MCPError: Codable {
             // Extract underlying error string if present
             let underlyingErrorString =
                 data?["error"].flatMap { val -> String? in
-                    if case .string(let str) = val { return str }
+                    if case let .string(str) = val { return str }
                     return nil
                 } ?? message
             self = .transportError(
@@ -229,21 +234,21 @@ extension MCPError: Hashable {
     public func hash(into hasher: inout Hasher) {
         hasher.combine(code)
         switch self {
-        case .parseError(let detail):
+        case let .parseError(detail):
             hasher.combine(detail)
-        case .invalidRequest(let detail):
+        case let .invalidRequest(detail):
             hasher.combine(detail)
-        case .methodNotFound(let detail):
+        case let .methodNotFound(detail):
             hasher.combine(detail)
-        case .invalidParams(let detail):
+        case let .invalidParams(detail):
             hasher.combine(detail)
-        case .internalError(let detail):
+        case let .internalError(detail):
             hasher.combine(detail)
-        case .serverError(_, let message):
+        case let .serverError(_, message):
             hasher.combine(message)
-        case .connectionClosed, .unauthorized:
+        case .connectionClosed, .unauthorized, .unsupportedMethod:
             break
-        case .transportError(let error):
+        case let .transportError(error):
             hasher.combine(error.localizedDescription)
         }
     }

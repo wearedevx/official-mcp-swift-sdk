@@ -95,7 +95,8 @@ public actor HTTPClientTransport: Actor, Transport {
         }
 
         if let eventListeningError {
-            logger.error("HTTP transport failed to connect: \(eventListeningError.localizedDescription)")
+            logger.error(
+                "HTTP transport failed to connect: \(eventListeningError.localizedDescription)")
             throw eventListeningError
         }
 
@@ -141,7 +142,7 @@ public actor HTTPClientTransport: Actor, Transport {
         let repr = """
         \(request.httpMethod ?? "") \(request.url?.absoluteString ?? "<no url>")
         \(request.allHTTPHeaderFields?.map { "\($0.0): \($0.1)" }.joined(separator: "\n") ?? "")
-        
+
         \(String(data: data, encoding: .utf8) ?? "<no-data>")
         """
 
@@ -159,18 +160,18 @@ public actor HTTPClientTransport: Actor, Transport {
         // Extract session ID if present
         if let newSessionID = httpResponse.value(forHTTPHeaderField: "Mcp-Session-Id") {
             sessionID = newSessionID
-            logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
+            logger.info("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
         }
-
 
         // Handle different response types
         switch httpResponse.statusCode {
         case 200, 201, 202:
             // For SSE, the processing happens in the streaming task
             if contentType.contains("text/event-stream") {
-                logger.debug("Received SSE response, processing in streaming task")
+                logger.info("Received SSE response, processing in streaming task")
 
                 try await decodeSSEStream(stream) { message in
+                    self.logger.info("Received Streamed message \(String(data: message, encoding: .utf8) ?? "<binary data>")")
                     self.messageContinuation.yield(message)
                 }
                 return
@@ -183,7 +184,7 @@ public actor HTTPClientTransport: Actor, Transport {
                     data.append(byte)
                 }
 
-                logger.debug("Received JSON response", metadata: ["size": "\(data.count)"])
+                logger.info("Received JSON response", metadata: ["size": "\(data.count)"])
                 messageContinuation.yield(data)
             }
 
@@ -210,14 +211,7 @@ public actor HTTPClientTransport: Actor, Transport {
 
     /// Receives data in an async sequence
     public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
-        AsyncThrowingStream { continuation in
-            Task {
-                for try await message in messageStream {
-                    continuation.yield(message)
-                }
-                continuation.finish()
-            }
-        }
+        messageStream
     }
 
     // MARK: - SSE
@@ -234,9 +228,13 @@ public actor HTTPClientTransport: Actor, Transport {
                 logger.error("Invalid connection parameters: \(error ?? "unknow")")
                 self.eventListeningError = MCPError.invalidParams(error)
                 break
-            } catch MCPError.unauthorized(let wwwAuthenticateHeader) {
+            } catch let MCPError.unauthorized(wwwAuthenticateHeader) {
                 eventListeningError = MCPError.unauthorized(wwwAuthenticateHeader)
                 logger.error("Unauthorized")
+                break
+            } catch MCPError.unsupportedMethod {
+                eventListeningError = MCPError.unsupportedMethod
+                logger.warning("Connection to MCP server does not support this method")
                 break
             } catch {
                 if !Task.isCancelled {
@@ -260,6 +258,7 @@ public actor HTTPClientTransport: Actor, Transport {
             var request = URLRequest(url: endpoint)
             request.httpMethod = "GET"
             request.addValue("text/event-stream", forHTTPHeaderField: "Accept")
+
             request.addValue("2025-11-25", forHTTPHeaderField: "MCP-Protocol-Version")
 
             // Add session ID if available
@@ -285,27 +284,36 @@ public actor HTTPClientTransport: Actor, Transport {
                 throw MCPError.internalError("Invalid HTTP response")
             }
 
-            var data = Data()
-            for try await byte in stream {
-                data.append(byte)
+            func consumeBody(_ stream: URLSession.AsyncBytes) async throws -> String {
+                var data = Data()
+                for try await byte in stream {
+                    data.append(byte)
+                }
+                return String(data: data, encoding: .utf8) ?? ""
             }
-            let rawBody = String(data: data, encoding: .utf8) ?? ""
 
             switch httpResponse.statusCode {
             case 200: break
 
             case 400:
+                let rawBody = try? await consumeBody(stream)
+
                 endpointPostURL = endpoint
                 logger.error("MCP Connection invalid params BODY: \(rawBody)")
                 throw MCPError.invalidParams("Invalid parameters provided")
 
             case 401:
-                let wwwAuthenticateHeader = httpResponse.value(forHTTPHeaderField: "WWW-Authenticate")
+                let wwwAuthenticateHeader = httpResponse.value(
+                    forHTTPHeaderField: "WWW-Authenticate")
                 throw MCPError.unauthorized(wwwAuthenticateHeader)
 
             case 404:
+                let rawBody = try? await consumeBody(stream)
                 logger.error("MCP Connection Endpoint not found BODY: \(rawBody)")
                 throw MCPError.internalError("Endpoint not found")
+
+            case 405:
+                throw MCPError.unsupportedMethod
 
             default:
                 throw MCPError.internalError("HTTP error: \(httpResponse.statusCode)")
@@ -323,7 +331,9 @@ public actor HTTPClientTransport: Actor, Transport {
         }
     #endif
 
-    private func decodeSSEStream(_ stream: URLSession.AsyncBytes, handleMessage: @escaping @Sendable (Data) -> Void) async throws {
+    private func decodeSSEStream(
+        _ stream: URLSession.AsyncBytes, handleMessage: @escaping @Sendable (Data) -> Void
+    ) async throws {
         var buffer: [UInt8] = []
         var eventType = ""
         var eventID: String?
@@ -353,23 +363,38 @@ public actor HTTPClientTransport: Actor, Transport {
                                     lastEventID = eventID
                                 } else if eventType == "endpoint" {
                                     if let endpointCommunication {
-                                        if let newEndpoint = URL(string: "\(endpointCommunication.absoluteString)\(eventData)") {
+                                        if let newEndpoint = URL(
+                                            string:
+                                            "\(endpointCommunication.absoluteString)\(eventData)"
+                                        ) {
                                             endpointPostURL = newEndpoint
-                                            logger.info("Received new endpoint via SSE with endpointCommunication: \(newEndpoint.absoluteString)")
+                                            logger.info(
+                                                "Received new endpoint via SSE with endpointCommunication: \(newEndpoint.absoluteString)"
+                                            )
                                         } else {
-                                            logger.error("Failed to construct new endpoint URL from SSE data: \(eventData)")
+                                            logger.error(
+                                                "Failed to construct new endpoint URL from SSE data: \(eventData)"
+                                            )
                                         }
                                     } else if let scheme = endpoint.scheme, let host = endpoint.host {
                                         // Construct the new endpoint URL using the original scheme and host
                                         let portString = endpoint.port.map { ":\($0)" } ?? ""
-                                        if let newEndpoint = URL(string: "\(scheme)://\(host)\(portString)\(eventData)") {
+                                        if let newEndpoint = URL(
+                                            string: "\(scheme)://\(host)\(portString)\(eventData)")
+                                        {
                                             endpointPostURL = newEndpoint
-                                            logger.info("Received new endpoint via SSE: \(newEndpoint.absoluteString)")
+                                            logger.info(
+                                                "Received new endpoint via SSE: \(newEndpoint.absoluteString)"
+                                            )
                                         } else {
-                                            logger.error("Failed to construct new endpoint URL from SSE data: \(eventData)")
+                                            logger.error(
+                                                "Failed to construct new endpoint URL from SSE data: \(eventData)"
+                                            )
                                         }
                                     } else {
-                                        logger.error("Original endpoint is missing scheme or host, cannot construct new endpoint.")
+                                        logger.error(
+                                            "Original endpoint is missing scheme or host, cannot construct new endpoint."
+                                        )
                                     }
                                 } else {
                                     // Default event type is "message" if not specified
@@ -377,8 +402,9 @@ public actor HTTPClientTransport: Actor, Transport {
                                         logger.debug(
                                             "SSE event received",
                                             metadata: [
-                                                "type": "\(eventType.isEmpty ? "message" : eventType)",
-                                                "id": "\(eventID ?? "none")"
+                                                "type":
+                                                    "\(eventType.isEmpty ? "message" : eventType)",
+                                                "id": "\(eventID ?? "none")",
                                             ]
                                         )
                                         handleMessage(data)
