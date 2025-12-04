@@ -24,7 +24,7 @@ public actor OAuthHTTPClientTransport: Transport {
     public nonisolated let logger: Logger
 
     /// The underlying HTTP transport - recreated when token changes
-    private var baseTransport: HTTPClientTransport
+    private var baseTransport: any Transport
 
     /// URLSession configuration template
     private let sessionConfiguration: URLSessionConfiguration
@@ -70,6 +70,36 @@ public actor OAuthHTTPClientTransport: Transport {
             tokenStorage: tokenStorage,
             tokenIdentifier: tokenIdentifier,
             configuration: configuration,
+            streamableHTTP: false,
+            streaming: streaming,
+            logger: logger
+        )
+    }
+
+    public static func withDynamicDiscoveryAndHTTPStreaming(
+        endpoint: URL,
+        tokenStorage: TokenStorage? = nil,
+        tokenIdentifier: String = "default",
+        configuration: URLSessionConfiguration = .default,
+        streaming: Bool = true,
+        logger: Logger? = nil
+
+    ) -> OAuthHTTPClientTransport {
+        // Create a minimal configuration for discovery
+        // This will be replaced after dynamic registration
+        let discoveryConfig = try! OAuthConfiguration(
+            authorizationEndpoint: URL(string: "https://discovery.pending")!,
+            tokenEndpoint: URL(string: "https://discovery.pending")!,
+            clientId: UUID().uuidString // Temporary ID for discovery
+        )
+
+        return OAuthHTTPClientTransport(
+            endpoint: endpoint,
+            oauthConfig: discoveryConfig,
+            tokenStorage: tokenStorage,
+            tokenIdentifier: tokenIdentifier,
+            configuration: configuration,
+            streamableHTTP: true,
             streaming: streaming,
             logger: logger
         )
@@ -91,6 +121,7 @@ public actor OAuthHTTPClientTransport: Transport {
         tokenStorage: TokenStorage? = nil,
         tokenIdentifier: String = "default",
         configuration: URLSessionConfiguration = .default,
+        streamableHTTP: Bool = true,
         streaming: Bool = true,
         logger: Logger? = nil
     ) {
@@ -122,55 +153,51 @@ public actor OAuthHTTPClientTransport: Transport {
             logger: effectiveLogger
         )
 
-        baseTransport = HTTPClientTransport(
-            endpoint: endpoint,
-            session: session,
-            streaming: true,
-            requestModifier: { [weak tokenStorage] req async -> URLRequest in
-                guard let tokenStorage
-                else { return req }
+        if streamableHTTP {
+            baseTransport = StreamableHTTPTransport(
+                endpoint: endpoint,
+                session: session,
+                requestModifier: { [weak tokenStorage] req async -> URLRequest in
+                    guard let tokenStorage
+                    else { return req }
 
-                var request = req
+                    var request = req
 
-                if let token = try? await tokenStorage.retrieve(for: tokenIdentifier) {
-                    request
-                        .setValue(
-                            "\(token.tokenType.capitalized) \(token.accessToken)",
-                            forHTTPHeaderField: "Authorization"
-                        )
+                    if let token = try? await tokenStorage.retrieve(for: tokenIdentifier) {
+                        request
+                            .setValue(
+                                "\(token.tokenType.capitalized) \(token.accessToken)",
+                                forHTTPHeaderField: "Authorization"
+                            )
+                    }
+
+                    return request
                 }
+            )
+        } else {
+            baseTransport = HTTPClientTransport(
+                endpoint: endpoint,
+                session: session,
+                streaming: true,
+                requestModifier: { [weak tokenStorage] req async -> URLRequest in
+                    guard let tokenStorage
+                    else { return req }
 
-                return request
-            },
-            logger: logger
-        )
-    }
+                    var request = req
 
-    // Copy transport with new parameters
-    public static func from(_ other: OAuthHTTPClientTransport,
-                       endpoint: URL? = nil,
-                       oauthConfig: OAuthConfiguration? = nil,
-                       tokenStorage: TokenStorage? = nil,
-                       tokenIdentifier: String? = nil,
-                       configuration: URLSessionConfiguration? = nil,
-                       streaming: Bool? = nil,
-                       logger: Logger? = nil
-    ) async -> Self {
-        let otherOauthConfig = await other.authenticator.configuration
-        let otherTokenStorage = await other.authenticator.tokenStorage
-        let otherStreaming = await other.streaming
+                    if let token = try? await tokenStorage.retrieve(for: tokenIdentifier) {
+                        request
+                            .setValue(
+                                "\(token.tokenType.capitalized) \(token.accessToken)",
+                                forHTTPHeaderField: "Authorization"
+                            )
+                    }
 
-        return await Self.init(
-            endpoint: endpoint ?? other.endpoint,
-            oauthConfig: oauthConfig ?? otherOauthConfig,
-            tokenStorage: tokenStorage ?? otherTokenStorage,
-            tokenIdentifier: tokenIdentifier ?? other.tokenIdentifier,
-            configuration: configuration ?? other.sessionConfiguration,
-            streaming: streaming ?? otherStreaming,
-            logger: logger ?? other.logger
-        )
-
-
+                    return request
+                },
+                logger: logger
+            )
+        }
     }
 
     /// Creates or updates the base transport with current OAuth token
@@ -280,7 +307,7 @@ public actor OAuthHTTPClientTransport: Transport {
         }
     }
 
-    private var currentStream: AsyncThrowingStream<Data, Swift.Error>? = nil
+    private var currentStream: AsyncThrowingStream<Data, Swift.Error>?
 
     /// Receives data from the transport
     public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
@@ -288,7 +315,7 @@ public actor OAuthHTTPClientTransport: Transport {
             return currentStream
         }
 
-        self.currentStream = AsyncThrowingStream { continuation in
+        currentStream = AsyncThrowingStream { continuation in
             Task {
                 do {
                     // Delegate to base transport - SSE will have OAuth headers via URLSession configuration

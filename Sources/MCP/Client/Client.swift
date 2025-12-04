@@ -204,6 +204,7 @@ public actor Client {
     /// Connect to the server using the given transport
     public func connect() async throws {
         try await connection?.connect()
+        listenForMessages()
 
         await logger?.info(
             "Client connected", metadata: ["name": "\(name)", "version": "\(version)"]

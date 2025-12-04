@@ -1,6 +1,15 @@
 {
-  "originHash" : "cce36cb33302c2f1c28458e19b8439f736fc28106e4c6ea95d7992c74594c242",
+  "originHash" : "f94af75b0a568f5d0ba2db08843c85aa1fdc18c00af7dd13f8b65ec9fc9aa197",
   "pins" : [
+    {
+      "identity" : "eventsource",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/mattt/eventsource.git",
+      "state" : {
+        "revision" : "07957602bb99a5355c810187e66e6ce378a1057d",
+        "version" : "1.1.1"
+      }
+    },
     {
       "identity" : "swift-log",
       "kind" : "remoteSourceControl",
