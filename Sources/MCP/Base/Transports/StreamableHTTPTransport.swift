@@ -13,6 +13,7 @@ actor StreamableHTTPTransport: Transport {
     private var lastEventID: String?
 
     private var session: URLSession
+    private var listenerSession: URLSession
     private var isConnected = false
     private var isListeningForServerEvents = false
 
@@ -36,6 +37,8 @@ actor StreamableHTTPTransport: Transport {
         self.requestModifier = requestModifier
         self.session = session
 
+        listenerSession = Self.createListenerSession()
+
         let (stream, continuation) = AsyncThrowingStream<Data, Swift.Error>.makeStream()
 
         messageStream = stream
@@ -46,6 +49,15 @@ actor StreamableHTTPTransport: Transport {
         }
 
         self.logger.info("Streamable HTTP client transport initialized sessionID == nil")
+    }
+
+    private nonisolated static func createListenerSession() -> URLSession {
+        let listenerConfiguration = URLSessionConfiguration.default
+        listenerConfiguration.timeoutIntervalForRequest = .infinity
+        listenerConfiguration.timeoutIntervalForResource = .infinity
+        listenerConfiguration.httpAdditionalHeaders = ["Accept": "text/event-stream"]
+
+        return URLSession(configuration: listenerConfiguration)
     }
 
     func connect() async throws {
@@ -84,6 +96,7 @@ actor StreamableHTTPTransport: Transport {
         streamingTask?.cancel()
         streamingTask = nil
         session.finishTasksAndInvalidate()
+        listenerSession.finishTasksAndInvalidate()
 
         logger.info("HTTP clienttransport disconnected")
     }
@@ -348,6 +361,8 @@ actor StreamableHTTPTransport: Transport {
     /// Establishes an SSE connection to the server
     private func connectToEventStream() async throws {
         guard isConnected else { return }
+        listenerSession.finishTasksAndInvalidate()
+        listenerSession = Self.createListenerSession()
 
         var request = URLRequest(url: endpoint)
         request.httpMethod = "GET"
@@ -378,7 +393,7 @@ actor StreamableHTTPTransport: Transport {
         """)
 
         // Create URLSession task for SSE
-        let (stream, response) = try await session.bytes(for: request)
+        let (stream, response) = try await listenerSession.bytes(for: request)
 
         guard let httpResponse = response as? HTTPURLResponse else {
             throw MCPError.internalError("Invalid HTTP response")

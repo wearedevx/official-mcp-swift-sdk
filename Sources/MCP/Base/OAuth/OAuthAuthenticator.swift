@@ -168,7 +168,7 @@ public actor OAuthAuthenticator {
 
         request.httpBody = formURLEncode(parameters).data(using: .utf8)
 
-        let token = try await performTokenRequest(request)
+        let token = try await performTokenRequest(request, for: configuration.clientId)
 
         // Store and cache the token
         try await tokenStorage.store(token: token, for: identifier)
@@ -248,7 +248,7 @@ public actor OAuthAuthenticator {
 
         request.httpBody = formURLEncode(parameters).data(using: .utf8)
 
-        let token = try await performTokenRequest(request)
+        let token = try await performTokenRequest(request, for: configuration.clientId)
 
         // Store and cache the token
         try await tokenStorage.store(token: token, for: identifier)
@@ -265,11 +265,13 @@ public actor OAuthAuthenticator {
             return try await existingTask.value
         }
 
-        guard let refreshToken = token.refreshToken else {
+        guard let refreshToken = token.refreshToken,
+              let clientId = token.clientId
+        else {
             throw OAuthError.refreshTokenNotAvailable
         }
 
-        logger.info("Refreshing access token")
+        logger.info("Refreshing access token", metadata: ["identifier": "\(identifier)", "token-endpoint": "\(configuration.tokenEndpoint.absoluteString)"])
 
         let task = Task<OAuthToken, Swift.Error> {
             defer { refreshTask = nil }
@@ -281,7 +283,7 @@ public actor OAuthAuthenticator {
             var parameters = [
                 "grant_type": "refresh_token",
                 "refresh_token": refreshToken,
-                "client_id": configuration.clientId,
+                "client_id": clientId,
             ]
 
             // Add client secret for confidential clients
@@ -296,7 +298,7 @@ public actor OAuthAuthenticator {
 
             request.httpBody = formURLEncode(parameters).data(using: .utf8)
 
-            let newToken = try await performTokenRequest(request)
+            let newToken = try await performTokenRequest(request, for: configuration.clientId)
 
             // Store and cache the new token
             try await tokenStorage.store(token: newToken, for: identifier)
@@ -399,7 +401,7 @@ public actor OAuthAuthenticator {
         // Priority 1: OAuth 2.0 Authorization Server Metadata
         if let domain = issuerURL.host,
            let scheme = issuerURL.scheme,
-           let portString = issuerURL.port.map { ":\($0)" } ?? "", let oauthURL = URL(string: "\(scheme)://\(domain)\(portString)/.well-known/oauth-authorization-server")
+           let portString = issuerURL.port.map({ ":\($0)" }) ?? "", let oauthURL = URL(string: "\(scheme)://\(domain)\(portString)/.well-known/oauth-authorization-server")
         {
             discoveryURLs.append(oauthURL)
         }
@@ -700,8 +702,22 @@ public actor OAuthAuthenticator {
 
     // MARK: - Private Methods
 
-    private func performTokenRequest(_ request: URLRequest) async throws -> OAuthToken {
+    private func performTokenRequest(_ request: URLRequest, for clientId: String) async throws -> OAuthToken {
         let (data, response) = try await urlSession.data(for: request)
+
+        let repr = """
+        --
+        REFRESH TOKEN:
+        \(request.httpMethod ?? "GET") \(request.url?.absoluteString ?? "<no url provided>")
+        \(request.allHTTPHeaderFields?.map { key, value in
+            "\(key): \(value)"
+        }.joined(separator: "\n") ?? "")
+
+        \(String(data: request.httpBody ?? Data(), encoding: .utf8) ?? "<no body>")
+        --
+        """
+
+        logger.info("SENDING: \(repr)")
 
         guard let httpResponse = response as? HTTPURLResponse else {
             throw OAuthError.invalidResponse
@@ -734,7 +750,8 @@ public actor OAuthAuthenticator {
                 expiresIn: tokenResponse.expires_in,
                 refreshToken: tokenResponse.refresh_token,
                 scope: tokenResponse.scope,
-                issuedAt: Date()
+                issuedAt: Date(),
+                clientId: clientId
             )
         } catch {
             logger.error("Failed to decode token response", metadata: ["error": "\(error)"])

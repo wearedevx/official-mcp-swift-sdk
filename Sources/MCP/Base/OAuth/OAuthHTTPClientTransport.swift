@@ -206,7 +206,7 @@ public actor OAuthHTTPClientTransport: Transport {
     }
 
     /// Creates or updates the base transport with current OAuth token
-    private func updateBaseTransport(with token: OAuthToken) {
+    public func updateBaseTransport(with token: OAuthToken) {
         // Create a new configuration with OAuth headers
         guard let config = sessionConfiguration.copy() as? URLSessionConfiguration else {
             logger.error("Failed to copy URLSession configuration")
@@ -263,12 +263,6 @@ public actor OAuthHTTPClientTransport: Transport {
 
         // Try to get existing valid token first
         do {
-            // let token = try await authenticator.getValidToken(for: tokenIdentifier)
-            // logger.debug("Existing OAuth token available")
-            //
-            // // Create base transport with authenticated session
-            // updateBaseTransport(with: token)
-
             // Connect the base transport
             try await baseTransport.connect()
             isConnected = true
@@ -508,15 +502,8 @@ public actor OAuthHTTPClientTransport: Transport {
             let token = try await authenticator.getValidToken(for: tokenIdentifier)
             let newToken = try await authenticator.refreshToken(token, identifier: tokenIdentifier)
 
-            let reconnect = isConnected
-            if reconnect {
-                await baseTransport.disconnect()
-            }
-
             updateBaseTransport(with: newToken)
-            if reconnect {
-                try await baseTransport.connect()
-            }
+            logger.info("OAuth HTTP transport connected with existing token")
             return
         } catch {
             logger.error("Failed to refresh token, \(error)")
