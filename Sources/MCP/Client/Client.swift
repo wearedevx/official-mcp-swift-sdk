@@ -212,7 +212,7 @@ public actor Client {
     }
 
     public func listenForMessages() {
-        task?.cancel()
+        guard task == nil else { return }
 
         // Start message handling loop
         task = Task {
@@ -228,24 +228,44 @@ public actor Client {
 
                         // Attempt to decode data
                         // Try decoding as a batch response first
-                        if let batchResponse = try? decoder.decode([AnyResponse].self, from: data) {
+                        do {
+                            let batchResponse = try decoder.decode([AnyResponse].self, from: data)
                             await handleBatchResponse(batchResponse)
-                        } else if let response = try? decoder.decode(AnyResponse.self, from: data),
-                                  let request = pendingRequests[response.id]
-                        {
-                            await handleResponse(response, for: request)
-                        } else if let message = try? decoder.decode(AnyMessage.self, from: data) {
-                            await handleMessage(message)
-                        } else {
-                            var metadata: Logger.Metadata = [:]
-                            if let string = String(data: data, encoding: .utf8) {
-                                metadata["message"] = .string(string)
-                            }
-                            await logger?.warning(
-                                "Unexpected message received by client (not single/batch response or notification)",
-                                metadata: metadata
-                            )
+                            continue
+                        } catch {
+                            await logger?.warning("Failed to decode batch response", metadata: ["error": "\(error)"])
                         }
+
+                        do {
+                            let response = try decoder.decode(AnyResponse.self, from: data)
+                            await logger?.info("Received response", metadata: ["id": "\(response.id)", "result": "\(response.result)"])
+                            if let request = pendingRequests[response.id] {
+                                await handleResponse(response, for: request)
+                                continue
+                            } else {
+                                await logger?.warning("Received response for unknown request", metadata: ["id": "\(response.id)"])
+                                continue
+                            }
+                        } catch {
+                            await logger?.warning("Failed to decode response", metadata: ["error": "\(error)"])
+                        }
+
+                        do {
+                            let message = try decoder.decode(AnyMessage.self, from: data)
+                            await handleMessage(message)
+                            continue
+                        } catch {
+                            await logger?.warning("Failed to decode message", metadata: ["error": "\(error)"])
+                        }
+
+                        var metadata: Logger.Metadata = [:]
+                        if let string = String(data: data, encoding: .utf8) {
+                            metadata["message"] = .string(string)
+                        }
+                        await logger?.warning(
+                            "Unexpected message received by client (not single/batch response or notification)",
+                            metadata: metadata
+                        )
                     }
                 } catch let error where MCPError.isResourceTemporarilyUnavailable(error) {
                     try? await Task.sleep(for: .milliseconds(10))
@@ -502,6 +522,7 @@ public actor Client {
         listenForMessages()
 
         let result = try await send(request)
+        await logger?.info("Initialize RESULT", metadata: ["result": "\(result)"])
 
         serverCapabilities = result.capabilities
         serverVersion = result.protocolVersion

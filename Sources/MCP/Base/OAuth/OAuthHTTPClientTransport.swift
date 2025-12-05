@@ -32,6 +32,9 @@ public actor OAuthHTTPClientTransport: Transport {
     /// Whether streaming is enabled
     public var streaming: Bool
 
+    /// Whether streamable HTTP is enabled
+    private let streamableHTTP: Bool
+
     /// Whether the transport has been explicitly connected
     private var isConnected = false
 
@@ -128,8 +131,9 @@ public actor OAuthHTTPClientTransport: Transport {
         self.endpoint = endpoint
         sessionConfiguration = configuration
         self.streaming = streaming
+        self.streamableHTTP = streamableHTTP
 
-        let effectiveLogger = logger ?? Logger(label: "mcp.transport.oauth.http.client")
+        let effectiveLogger = logger ?? Logger(label: "mcp.client.oauth.http.transport")
         self.logger = effectiveLogger
         self.tokenIdentifier = tokenIdentifier
 
@@ -172,7 +176,8 @@ public actor OAuthHTTPClientTransport: Transport {
                     }
 
                     return request
-                }
+                },
+                logger: self.logger
             )
         } else {
             baseTransport = HTTPClientTransport(
@@ -214,20 +219,40 @@ public actor OAuthHTTPClientTransport: Transport {
         // Create a new session with the updated configuration
         let authenticatedSession = URLSession(configuration: config)
 
-        // Create new transport with authenticated session
-        baseTransport = HTTPClientTransport(
-            endpoint: endpoint,
-            session: authenticatedSession,
-            streaming: streaming,
-            requestModifier: { request in
-                var request = request
+        // Clear existing stream so next receive() gets a fresh one
+        currentStream = nil
 
-                request.setValue("\(token.tokenType.capitalized) \(token.accessToken)", forHTTPHeaderField: "Authorization")
-
-                return request
-            },
-            logger: logger
-        )
+        if streamableHTTP {
+            baseTransport = StreamableHTTPTransport(
+                endpoint: endpoint,
+                session: authenticatedSession,
+                requestModifier: { request in
+                    var request = request
+                    request.setValue(
+                        "\(token.tokenType.capitalized) \(token.accessToken)",
+                        forHTTPHeaderField: "Authorization"
+                    )
+                    return request
+                },
+                logger: logger
+            )
+        } else {
+            // Create new transport with authenticated session
+            baseTransport = HTTPClientTransport(
+                endpoint: endpoint,
+                session: authenticatedSession,
+                streaming: streaming,
+                requestModifier: { request in
+                    var request = request
+                    request.setValue(
+                        "\(token.tokenType.capitalized) \(token.accessToken)",
+                        forHTTPHeaderField: "Authorization"
+                    )
+                    return request
+                },
+                logger: logger
+            )
+        }
 
         logger.debug("Updated base transport with new OAuth token")
     }
@@ -238,11 +263,11 @@ public actor OAuthHTTPClientTransport: Transport {
 
         // Try to get existing valid token first
         do {
-            let token = try await authenticator.getValidToken(for: tokenIdentifier)
-            logger.debug("Existing OAuth token available")
-
-            // Create base transport with authenticated session
-            updateBaseTransport(with: token)
+            // let token = try await authenticator.getValidToken(for: tokenIdentifier)
+            // logger.debug("Existing OAuth token available")
+            //
+            // // Create base transport with authenticated session
+            // updateBaseTransport(with: token)
 
             // Connect the base transport
             try await baseTransport.connect()

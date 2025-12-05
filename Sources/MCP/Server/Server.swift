@@ -30,12 +30,16 @@ public actor Server {
     public struct Info: Hashable, Codable, Sendable {
         /// The server name
         public let name: String
+        public let title: String?
         /// The server version
         public let version: String
+        public let websiteUrl: String?
 
-        public init(name: String, version: String) {
+        public init(name: String, title: String? = nil, version: String, websiteUrl: String? = nil) {
             self.name = name
+            self.title = title
             self.version = version
+            self.websiteUrl = websiteUrl
         }
     }
 
@@ -148,7 +152,7 @@ public actor Server {
         capabilities: Server.Capabilities = .init(),
         configuration: Configuration = .default
     ) {
-        self.serverInfo = Server.Info(name: name, version: version)
+        serverInfo = Server.Info(name: name, version: version)
         self.capabilities = capabilities
         self.configuration = configuration
     }
@@ -161,19 +165,20 @@ public actor Server {
         transport: any Transport,
         initializeHook: (@Sendable (Client.Info, Client.Capabilities) async throws -> Void)? = nil
     ) async throws {
-        self.connection = transport
+        connection = transport
         registerDefaultHandlers(initializeHook: initializeHook)
         try await transport.connect()
 
         await logger?.info(
-            "Server started", metadata: ["name": "\(name)", "version": "\(version)"])
+            "Server started", metadata: ["name": "\(name)", "version": "\(version)"]
+        )
 
         // Start message handling loop
         task = Task {
             do {
                 let stream = await transport.receive()
                 for try await data in stream {
-                    if Task.isCancelled { break }  // Check cancellation inside loop
+                    if Task.isCancelled { break } // Check cancellation inside loop
 
                     var requestID: ID?
                     do {
@@ -188,7 +193,8 @@ public actor Server {
                         } else {
                             // Try to extract request ID from raw JSON if possible
                             if let json = try? JSONDecoder().decode(
-                                [String: Value].self, from: data),
+                                [String: Value].self, from: data
+                            ),
                                 let idValue = json["id"]
                             {
                                 if let strValue = idValue.stringValue {
@@ -205,7 +211,8 @@ public actor Server {
                         continue
                     } catch {
                         await logger?.error(
-                            "Error processing message", metadata: ["error": "\(error)"])
+                            "Error processing message", metadata: ["error": "\(error)"]
+                        )
                         let response = AnyMethod.response(
                             id: requestID ?? .random,
                             error: error as? MCPError
@@ -216,7 +223,8 @@ public actor Server {
                 }
             } catch {
                 await logger?.error(
-                    "Fatal error in message handling loop", metadata: ["error": "\(error)"])
+                    "Fatal error in message handling loop", metadata: ["error": "\(error)"]
+                )
             }
             await logger?.info("Server finished", metadata: [:])
         }
@@ -241,7 +249,7 @@ public actor Server {
     /// Register a method handler
     @discardableResult
     public func withMethodHandler<M: Method>(
-        _ type: M.Type,
+        _: M.Type,
         handler: @escaping @Sendable (M.Parameters) async throws -> M.Result
     ) -> Self {
         methodHandlers[M.name] = TypedRequestHandler { (request: Request<M>) -> Response<M> in
@@ -254,7 +262,7 @@ public actor Server {
     /// Register a notification handler
     @discardableResult
     public func onNotification<N: Notification>(
-        _ type: N.Type,
+        _: N.Type,
         handler: @escaping @Sendable (Message<N>) async throws -> Void
     ) -> Self {
         let handlers = notificationHandlers[N.name, default: []]
@@ -296,7 +304,6 @@ public actor Server {
         enum Item: Sendable {
             case request(Request<AnyMethod>)
             case notification(Message<AnyNotification>)
-
         }
 
         var items: [Item]
@@ -324,19 +331,19 @@ public actor Server {
         for item in batch.items {
             do {
                 switch item {
-                case .request(let request):
+                case let .request(request):
                     // For batched requests, collect responses instead of sending immediately
                     if let response = try await handleRequest(request, sendResponse: false) {
                         responses.append(response)
                     }
 
-                case .notification(let notification):
+                case let .notification(notification):
                     // Handle notification (no response needed)
                     try await handleMessage(notification)
                 }
             } catch {
                 // Only add errors to response for requests (notifications don't have responses)
-                if case .request(let request) = item {
+                if case let .request(request) = item {
                     let mcpError = error as? MCPError ?? MCPError.internalError(error.localizedDescription)
                     responses.append(AnyMethod.response(id: request.id, error: mcpError))
                 }
@@ -367,7 +374,7 @@ public actor Server {
     /// - Returns: The response when sendResponse is false
     private func handleRequest(_ request: Request<AnyMethod>, sendResponse: Bool = true) async throws -> Response<AnyMethod>? {
         // Check if this is a pre-processed error request (empty method)
-        if request.method.isEmpty && !sendResponse {
+        if request.method.isEmpty, !sendResponse {
             // This is a placeholder for an invalid request that couldn't be parsed in batch mode
             return AnyMethod.response(
                 id: request.id,
@@ -380,7 +387,8 @@ public actor Server {
             metadata: [
                 "method": "\(request.method)",
                 "id": "\(request.id)",
-            ])
+            ]
+        )
 
         if configuration.strict {
             // The client SHOULD NOT send requests other than pings
@@ -432,7 +440,8 @@ public actor Server {
     private func handleMessage(_ message: Message<AnyNotification>) async throws {
         await logger?.debug(
             "Processing notification",
-            metadata: ["method": "\(message.method)"])
+            metadata: ["method": "\(message.method)"]
+        )
 
         if configuration.strict {
             // Check initialization state unless this is an initialized notification
@@ -454,7 +463,8 @@ public actor Server {
                     metadata: [
                         "method": "\(message.method)",
                         "error": "\(error)",
-                    ])
+                    ]
+                )
             }
         }
     }
@@ -511,7 +521,7 @@ public actor Server {
         }
 
         // Ping
-        withMethodHandler(Ping.self) { _ in return Empty() }
+        withMethodHandler(Ping.self) { _ in Empty() }
     }
 
     private func setInitialState(
@@ -522,7 +532,7 @@ public actor Server {
         self.clientInfo = clientInfo
         self.clientCapabilities = clientCapabilities
         self.protocolVersion = protocolVersion
-        self.isInitialized = true
+        isInitialized = true
     }
 }
 
@@ -557,18 +567,19 @@ extension Server.Batch.Item: Codable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         // Check if it's a request (has id) or notification (no id)
         if container.contains(.id) {
-            self = .request(try Request<AnyMethod>(from: decoder))
+            self = try .request(Request<AnyMethod>(from: decoder))
         } else {
-            self = .notification(try Message<AnyNotification>(from: decoder))
+            self = try .notification(Message<AnyNotification>(from: decoder))
         }
     }
 
     func encode(to encoder: Encoder) throws {
         switch self {
-        case .request(let request):
+        case let .request(request):
             try request.encode(to: encoder)
-        case .notification(let notification):
+        case let .notification(notification):
             try notification.encode(to: encoder)
         }
     }
 }
+

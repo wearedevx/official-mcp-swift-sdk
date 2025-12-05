@@ -1,104 +1,41 @@
 import Foundation
 import Logging
 
-#if !os(Linux)
-    import EventSource
-#endif
-
 #if canImport(FoundationNetworking)
     import FoundationNetworking
 #endif
 
-/// An implementation of the MCP Streamable HTTP transport protocol for clients.
-///
-/// This transport implements the [Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http)
-/// specification from the Model Context Protocol.
-///
-/// It supports:
-/// - Sending JSON-RPC messages via HTTP POST requests
-/// - Receiving responses via both direct JSON responses and SSE streams
-/// - Session management using the `Mcp-Session-Id` header
-/// - Automatic reconnection for dropped SSE streams
-/// - Platform-specific optimizations for different operating systems
-///
-/// The transport supports two modes:
-/// - Regular HTTP (`streaming=false`): Simple request/response pattern
-/// - Streaming HTTP with SSE (`streaming=true`): Enables server-to-client push messages
-///
-/// - Important: Server-Sent Events (SSE) functionality is not supported on Linux platforms.
-///
-/// ## Example Usage
-///
-/// ```swift
-/// import MCP
-///
-/// // Create a streaming HTTP transport with bearer token authentication
-/// let transport = HTTPClientTransport(
-///     endpoint: URL(string: "https://api.example.com/mcp")!,
-///     requestModifier: { request in
-///         var modifiedRequest = request
-///         modifiedRequest.addValue("Bearer your-token-here", forHTTPHeaderField: "Authorization")
-///         return modifiedRequest
-///     }
-/// )
-///
-/// // Initialize the client with streaming transport
-/// let client = Client(name: "MyApp", version: "1.0.0")
-/// try await client.connect(transport: transport)
-///
-/// // The transport will automatically handle SSE events
-/// // and deliver them through the client's notification handlers
-/// ```
-public actor HTTPClientTransport: Transport {
-    /// The server endpoint URL to connect to
-    public let endpoint: URL
+public actor HTTPClientTransport: Actor, Transport {
+    public var endpoint: URL
+    public var endpointPostURL: URL?
     private let session: URLSession
-
-    /// The session ID assigned by the server, used for maintaining state across requests
     public private(set) var sessionID: String?
     private let streaming: Bool
     private var streamingTask: Task<Void, Never>?
-
-    /// Logger instance for transport-related events
+    private var lastEventID: String?
     public nonisolated let logger: Logger
-
-    /// Maximum time to wait for a session ID before proceeding with SSE connection
-    public let sseInitializationTimeout: TimeInterval
-
-    /// Closure to modify requests before they are sent
-    private let requestModifier: (URLRequest) async -> URLRequest
-
+    public var endpointCommunication: URL?
     private var isConnected = false
-    private let messageStream: AsyncThrowingStream<Data, Swift.Error>
-    private let messageContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
+    private var messageStream: AsyncThrowingStream<Data, Swift.Error>
+    private var messageContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
 
-    private var initialSessionIDSignalTask: Task<Void, Never>?
-    private var initialSessionIDContinuation: CheckedContinuation<Void, Never>?
+    private let requestModifier: (@Sendable (URLRequest) async -> URLRequest)?
 
-    /// Creates a new HTTP transport client with the specified endpoint
-    ///
-    /// - Parameters:
-    ///   - endpoint: The server URL to connect to
-    ///   - configuration: URLSession configuration to use for HTTP requests
-    ///   - streaming: Whether to enable SSE streaming mode (default: true)
-    ///   - sseInitializationTimeout: Maximum time to wait for session ID before proceeding with SSE (default: 10 seconds)
-    ///   - requestModifier: Optional closure to customize requests before they are sent (default: no modification)
-    ///   - logger: Optional logger instance for transport events
     public init(
         endpoint: URL,
         configuration: URLSessionConfiguration = .default,
-        streaming: Bool = true,
-        sseInitializationTimeout: TimeInterval = 10,
-        requestModifier: @escaping (URLRequest) async -> URLRequest = { $0 },
-        logger: Logger? = nil
+        streaming: Bool = false,
+        requestModifier: (@Sendable (URLRequest) async -> URLRequest)? = nil,
+        logger: Logger? = nil,
+        endpointCommunication: URL? = nil
     ) {
         self.init(
             endpoint: endpoint,
             session: URLSession(configuration: configuration),
             streaming: streaming,
-            sseInitializationTimeout: sseInitializationTimeout,
             requestModifier: requestModifier,
-            logger: logger
+            logger: logger,
+            endpointCommunication: endpointCommunication
         )
     }
 
@@ -106,14 +43,13 @@ public actor HTTPClientTransport: Transport {
         endpoint: URL,
         session: URLSession,
         streaming: Bool = false,
-        sseInitializationTimeout: TimeInterval = 10,
-        requestModifier: @escaping (URLRequest) async -> URLRequest = { $0 },
-        logger: Logger? = nil
+        requestModifier: (@Sendable (URLRequest) async -> URLRequest)? = nil,
+        logger: Logger? = nil,
+        endpointCommunication: URL? = nil
     ) {
         self.endpoint = endpoint
         self.session = session
         self.streaming = streaming
-        self.sseInitializationTimeout = sseInitializationTimeout
         self.requestModifier = requestModifier
 
         // Create message stream
@@ -127,51 +63,36 @@ public actor HTTPClientTransport: Transport {
                     label: "mcp.transport.http.client",
                     factory: { _ in SwiftLogNoOpLogHandler() }
                 )
-    }
-
-    // Setup the initial session ID signal
-    private func setupInitialSessionIDSignal() {
-        initialSessionIDSignalTask = Task {
-            await withCheckedContinuation { continuation in
-                self.initialSessionIDContinuation = continuation
-                // This task will suspend here until continuation.resume() is called
-            }
-        }
-    }
-
-    // Trigger the initial session ID signal when a session ID is established
-    private func triggerInitialSessionIDSignal() {
-        if let continuation = initialSessionIDContinuation {
-            continuation.resume()
-            initialSessionIDContinuation = nil // Consume the continuation
-            logger.trace("Initial session ID signal triggered for SSE task.")
-        }
+        self.endpointCommunication = endpointCommunication
     }
 
     /// Establishes connection with the transport
-    ///
-    /// This prepares the transport for communication and sets up SSE streaming
-    /// if streaming mode is enabled. The actual HTTP connection happens with the
-    /// first message sent.
     public func connect() async throws {
         guard !isConnected else { return }
         isConnected = true
-
-        // Setup initial session ID signal
-        setupInitialSessionIDSignal()
 
         if streaming {
             // Start listening to server events
             streamingTask = Task { await startListeningForServerEvents() }
         }
 
-        logger.debug("HTTP transport connected")
+        // wait for the connection to happen with a valid endpoint
+        let timeoutNs = 45_000_000_000 // 45 seconds
+        let sleepIntervalNs: UInt64 = 50_000_000 // 50 ms
+        var elapsedNs: UInt64 = 0
+
+        while endpointPostURL == nil {
+            if elapsedNs >= timeoutNs {
+                throw MCPError.internalError("Timeout waiting for valid endpoint from SSE")
+            }
+            try await Task.sleep(nanoseconds: sleepIntervalNs)
+            elapsedNs += sleepIntervalNs
+        }
+
+        logger.info("HTTP transport connected")
     }
 
     /// Disconnects from the transport
-    ///
-    /// This terminates any active connections, cancels the streaming task,
-    /// and releases any resources being used by the transport.
     public func disconnect() async {
         guard isConnected else { return }
         isConnected = false
@@ -180,164 +101,72 @@ public actor HTTPClientTransport: Transport {
         streamingTask?.cancel()
         streamingTask = nil
 
-        // Cancel any in-progress requests
-        session.invalidateAndCancel()
+        // Finish outstanding tasks and invalidate the session
+        session.finishTasksAndInvalidate()
 
         // Clean up message stream
         messageContinuation.finish()
 
-        // Cancel the initial session ID signal task if active
-        initialSessionIDSignalTask?.cancel()
-        initialSessionIDSignalTask = nil
-        // Resume the continuation if it's still pending to avoid leaks
-        initialSessionIDContinuation?.resume()
-        initialSessionIDContinuation = nil
-
-        logger.debug("HTTP clienttransport disconnected")
+        logger.info("HTTP clienttransport disconnected")
     }
 
     /// Sends data through an HTTP POST request
-    ///
-    /// This sends a JSON-RPC message to the server via HTTP POST and processes
-    /// the response according to the MCP Streamable HTTP specification. It handles:
-    ///
-    /// - Adding appropriate Accept headers for both JSON and SSE
-    /// - Including the session ID in requests if one has been established
-    /// - Processing different response types (JSON vs SSE)
-    /// - Handling HTTP error codes according to the specification
-    ///
-    /// - Parameter data: The JSON-RPC message to send
-    /// - Throws: MCPError for transport failures or server errors
     public func send(_ data: Data) async throws {
         guard isConnected else {
             throw MCPError.internalError("Transport not connected")
         }
 
-        var request = URLRequest(url: endpoint)
+        var request = URLRequest(url: endpointPostURL ?? endpoint)
         request.httpMethod = "POST"
         request.addValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+
         request.httpBody = data
 
         // Add session ID if available
-        if let sessionID = sessionID {
+        if let sessionID {
             request.addValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
         }
 
-        // Apply request modifier
-        request = await requestModifier(request)
-
-        #if os(Linux)
-            // Linux implementation using data(for:) instead of bytes(for:)
-            let (responseData, response) = try await session.data(for: request)
-            try await processResponse(response: response, data: responseData)
-        #else
-            // macOS and other platforms with bytes(for:) support
-            let (responseStream, response) = try await session.bytes(for: request)
-            try await processResponse(response: response, stream: responseStream)
-        #endif
-    }
-
-    #if os(Linux)
-        // Process response with data payload (Linux)
-        private func processResponse(response: URLResponse, data: Data) async throws {
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw MCPError.internalError("Invalid HTTP response")
-            }
-
-            // Process the response based on content type and status code
-            let contentType = httpResponse.value(forHTTPHeaderField: "Content-Type") ?? ""
-
-            // Extract session ID if present
-            if let newSessionID = httpResponse.value(forHTTPHeaderField: "Mcp-Session-Id") {
-                let wasSessionIDNil = (sessionID == nil)
-                sessionID = newSessionID
-                if wasSessionIDNil {
-                    // Trigger signal on first session ID
-                    triggerInitialSessionIDSignal()
-                }
-                logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
-            }
-
-            try processHTTPResponse(httpResponse, contentType: contentType)
-            guard case 200 ..< 300 = httpResponse.statusCode else { return }
-
-            // For JSON responses, yield the data
-            if contentType.contains("text/event-stream") {
-                logger.warning("SSE responses aren't fully supported on Linux")
-                messageContinuation.yield(data)
-            } else if contentType.contains("application/json") {
-                logger.trace("Received JSON response", metadata: ["size": "\(data.count)"])
-                messageContinuation.yield(data)
-            } else {
-                logger.warning("Unexpected content type: \(contentType)")
-            }
+        if let requestModifier {
+            request = await requestModifier(request)
         }
-    #else
-        // Process response with byte stream (macOS, iOS, etc.)
-        private func processResponse(response: URLResponse, stream: URLSession.AsyncBytes)
-            async throws
-        {
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw MCPError.internalError("Invalid HTTP response")
-            }
 
-            // Process the response based on content type and status code
-            let contentType = httpResponse.value(forHTTPHeaderField: "Content-Type") ?? ""
+        let (responseData, response) = try await session.data(for: request)
 
-            // Extract session ID if present
-            if let newSessionID = httpResponse.value(forHTTPHeaderField: "Mcp-Session-Id") {
-                let wasSessionIDNil = (sessionID == nil)
-                sessionID = newSessionID
-                if wasSessionIDNil {
-                    // Trigger signal on first session ID
-                    triggerInitialSessionIDSignal()
-                }
-                logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
-            }
-
-            try processHTTPResponse(httpResponse, contentType: contentType)
-            guard case 200 ..< 300 = httpResponse.statusCode else { return }
-
-            if contentType.contains("text/event-stream") {
-                // For SSE, processing happens via the stream
-                logger.trace("Received SSE response, processing in streaming task")
-                try await processSSE(stream)
-            } else if contentType.contains("application/json") {
-                // For JSON responses, collect and deliver the data
-                var buffer = Data()
-                for try await byte in stream {
-                    buffer.append(byte)
-                }
-                logger.trace("Received JSON response", metadata: ["size": "\(buffer.count)"])
-                messageContinuation.yield(buffer)
-            } else {
-                logger.warning("Unexpected content type: \(contentType)")
-            }
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw MCPError.internalError("Invalid HTTP response")
         }
-    #endif
 
-    // Common HTTP response handling for all platforms
-    private func processHTTPResponse(_ response: HTTPURLResponse, contentType: String) throws {
-        // Handle status codes according to HTTP semantics
-        switch response.statusCode {
-        case 200 ..< 300:
-            // Success range - these are handled by the platform-specific code
-            return
+        // Process the response based on content type and status code
+        let contentType = httpResponse.value(forHTTPHeaderField: "Content-Type") ?? ""
+
+        // Extract session ID if present
+        if let newSessionID = httpResponse.value(forHTTPHeaderField: "Mcp-Session-Id") {
+            sessionID = newSessionID
+            logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
+        }
+
+        // Handle different response types
+        switch httpResponse.statusCode {
+        case 200, 201, 202:
+            // For SSE, the processing happens in the streaming task
+            if contentType.contains("text/event-stream") {
+                logger.debug("Received SSE response, processing in streaming task")
+                // The streaming is handled by the SSE task if active
+                return
+            }
+
+            // For JSON responses, deliver the data directly
+            if contentType.contains("application/json"), !responseData.isEmpty {
+                logger.debug("Received JSON response", metadata: ["size": "\(responseData.count)"])
+                messageContinuation.yield(responseData)
+            }
 
         case 400:
-            throw MCPError.internalError("Bad request")
-
-        case 401:
-            // Check for WWW-Authenticate header (RFC 9728 for MCP OAuth)
-            if let wwwAuthHeader = response.value(forHTTPHeaderField: "WWW-Authenticate") {
-                throw MCPError.internalError("401 Unauthorized: \(wwwAuthHeader)")
-            } else {
-                throw MCPError.internalError("401 Unauthorized")
-            }
-
-        case 403:
-            throw MCPError.internalError("Access forbidden")
+            let rawBody = String(data: responseData, encoding: .utf8) ?? "<nil>"
+            logger.error("MCP invalid request body: \(rawBody)")
+            throw MCPError.invalidRequest(rawBody)
 
         case 404:
             // If we get a 404 with a session ID, it means our session is invalid
@@ -349,160 +178,82 @@ public actor HTTPClientTransport: Transport {
             throw MCPError.internalError("Endpoint not found")
 
         case 405:
-            // If we get a 405, it means the server does not support the requested method
-            // If streaming was requested, we should cancel the streaming task
-            if streaming {
-                streamingTask?.cancel()
-                throw MCPError.internalError("Server does not support streaming")
-            }
-            throw MCPError.internalError("Method not allowed")
-
-        case 408:
-            throw MCPError.internalError("Request timeout")
-
-        case 429:
-            throw MCPError.internalError("Too many requests")
-
-        case 500 ..< 600:
-            // Server error range
-            throw MCPError.internalError("Server error: \(response.statusCode)")
+            throw MCPError.methodNotFound("Method not found")
 
         default:
-            throw MCPError.internalError(
-                "Unexpected HTTP response: \(response.statusCode) (\(contentType))")
+            throw MCPError.internalError("HTTP error: \(httpResponse.statusCode)")
         }
     }
 
     /// Receives data in an async sequence
-    ///
-    /// This returns an AsyncThrowingStream that emits Data objects representing
-    /// each JSON-RPC message received from the server. This includes:
-    ///
-    /// - Direct responses to client requests
-    /// - Server-initiated messages delivered via SSE streams
-    ///
-    /// - Returns: An AsyncThrowingStream of Data objects
     public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
+        // cloase previously existing streams so that we don’t have more than one task
+        // listening on the same stream
+        messageContinuation.finish()
+
+        let (stream, continuation) = AsyncThrowingStream<Data, Swift.Error>.makeStream()
+
+        messageContinuation = continuation
+        messageStream = stream
+
         return messageStream
     }
 
     // MARK: - SSE
 
     /// Starts listening for server events using SSE
-    ///
-    /// This establishes a long-lived HTTP connection using Server-Sent Events (SSE)
-    /// to enable server-to-client push messaging. It handles:
-    ///
-    /// - Waiting for session ID if needed
-    /// - Opening the SSE connection
-    /// - Automatic reconnection on connection drops
-    /// - Processing received events
     private func startListeningForServerEvents() async {
-        #if os(Linux)
-            // SSE is not fully supported on Linux
-            if streaming {
-                logger.warning(
-                    "SSE streaming was requested but is not fully supported on Linux. SSE connection will not be attempted."
-                )
-            }
-        #else
-            // This is the original code for platforms that support SSE
-            guard isConnected else { return }
+        guard isConnected else { return }
 
-            // Wait for the initial session ID signal, but only if sessionID isn't already set
-            if sessionID == nil, let signalTask = initialSessionIDSignalTask {
-                logger.trace("SSE streaming task waiting for initial sessionID signal...")
-
-                // Race the signalTask against a timeout
-                let timeoutTask = Task {
-                    try? await Task.sleep(for: .seconds(self.sseInitializationTimeout))
-                    return false
-                }
-
-                let signalCompletionTask = Task {
-                    await signalTask.value
-                    return true // Indicates signal received
-                }
-
-                // Use TaskGroup to race the two tasks
-                var signalReceived = false
-                do {
-                    signalReceived = try await withThrowingTaskGroup(of: Bool.self) { group in
-                        group.addTask {
-                            await signalCompletionTask.value
-                        }
-                        group.addTask {
-                            await timeoutTask.value
-                        }
-
-                        // Take the first result and cancel the other task
-                        if let firstResult = try await group.next() {
-                            group.cancelAll()
-                            return firstResult
-                        }
-                        return false
-                    }
-                } catch {
-                    logger.error("Error while waiting for session ID signal: \(error)")
-                }
-
-                // Clean up tasks
-                timeoutTask.cancel()
-
-                if signalReceived {
-                    logger.trace("SSE streaming task proceeding after initial sessionID signal.")
-                } else {
-                    logger.warning(
-                        "Timeout waiting for initial sessionID signal. SSE stream will proceed (sessionID might be nil)."
-                    )
-                }
-            } else if sessionID != nil {
-                logger.trace(
-                    "Initial sessionID already available. Proceeding with SSE streaming task immediately."
-                )
-            } else {
-                logger.trace(
-                    "Proceeding with SSE connection attempt; sessionID is nil. This might be expected for stateless servers or if initialize hasn't provided one yet."
-                )
-            }
-
-            // Retry loop for connection drops
-            while isConnected, !Task.isCancelled {
-                do {
-                    try await connectToEventStream()
-                } catch {
-                    if !Task.isCancelled {
-                        logger.error("SSE connection error: \(error)")
-                        // Wait before retrying
-                        try? await Task.sleep(for: .seconds(1))
-                    }
+        // Retry loop for connection drops
+        while isConnected, !Task.isCancelled {
+            do {
+                try await connectToEventStream()
+            } catch let MCPError.invalidParams(error) {
+                logger.error("Invalid connection parameters: \(error ?? "unknow")")
+                break
+            } catch MCPError.unauthorized {
+                logger.error("Unauthorized")
+                break
+            } catch MCPError.methodNotFound {
+                logger.warning("Connection to MCP server does not support this method")
+                break
+            } catch {
+                if !Task.isCancelled {
+                    logger.error("SSE connection error: \(error)")
+                    // Wait before retrying
+                    try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
                 }
             }
-        #endif
+        }
     }
 
-    #if !os(Linux)
+    #if canImport(FoundationNetworking)
+        private func connectToEventStream() async throws {
+            logger.warning("SSE is not supported on this platform")
+        }
+    #else
         /// Establishes an SSE connection to the server
-        ///
-        /// This initiates a GET request to the server endpoint with appropriate
-        /// headers to establish an SSE stream according to the MCP specification.
-        ///
-        /// - Throws: MCPError for connection failures or server errors
         private func connectToEventStream() async throws {
             guard isConnected else { return }
 
             var request = URLRequest(url: endpoint)
             request.httpMethod = "GET"
             request.addValue("text/event-stream", forHTTPHeaderField: "Accept")
-            request.addValue("no-cache", forHTTPHeaderField: "Cache-Control")
 
             // Add session ID if available
-            if let sessionID = sessionID {
+            if let sessionID {
                 request.addValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
             }
 
-            // Apply request modifier
-            request = await requestModifier(request)
+            // Add Last-Event-ID header for resumability if available
+            if let lastEventID {
+                request.addValue(lastEventID, forHTTPHeaderField: "Last-Event-ID")
+            }
+
+            if let requestModifier {
+                request = await requestModifier(request)
+            }
 
             logger.debug("Starting SSE connection")
 
@@ -513,58 +264,148 @@ public actor HTTPClientTransport: Transport {
                 throw MCPError.internalError("Invalid HTTP response")
             }
 
-            // Check response status
-            guard httpResponse.statusCode == 200 else {
-                // If the server returns 405 Method Not Allowed,
-                // it indicates that the server doesn't support SSE streaming.
-                // We should cancel the task instead of retrying the connection.
-                if httpResponse.statusCode == 405 {
-                    streamingTask?.cancel()
+            func consumeBody(_ stream: URLSession.AsyncBytes) async -> String {
+                var data = Data()
+                do {
+                    for try await byte in stream {
+                        data.append(byte)
+                    }
+                } catch {
+                    return "<unreadable: \(error)>"
                 }
+                return String(data: data, encoding: .utf8) ?? ""
+            }
+
+            switch httpResponse.statusCode {
+            case 200: break
+            case 400:
+                let rawBody = await consumeBody(stream)
+                throw MCPError.invalidParams("Invalid parameters provided \(rawBody)")
+            case 401:
+                let wwwAuthHeader = httpResponse.value(forHTTPHeaderField: "WWW-Authenticate")
+                throw MCPError.unauthorized(wwwAuthHeader)
+            case 405:
+                throw MCPError.methodNotFound("Method not found")
+            default:
                 throw MCPError.internalError("HTTP error: \(httpResponse.statusCode)")
             }
 
             // Extract session ID if present
             if let newSessionID = httpResponse.value(forHTTPHeaderField: "Mcp-Session-Id") {
-                let wasSessionIDNil = (sessionID == nil)
                 sessionID = newSessionID
-                if wasSessionIDNil {
-                    // Trigger signal on first session ID, though this is unlikely to happen here
-                    // as GET usually follows a POST that would have already set the session ID
-                    triggerInitialSessionIDSignal()
-                }
-                logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
             }
 
-            try await processSSE(stream)
-        }
+            // Process the SSE stream
+            var buffer: [UInt8] = []
+            var eventType = ""
+            var eventID: String?
+            var eventData = ""
 
-        /// Processes an SSE byte stream, extracting events and delivering them
-        ///
-        /// - Parameter stream: The URLSession.AsyncBytes stream to process
-        /// - Throws: Error for stream processing failures
-        private func processSSE(_ stream: URLSession.AsyncBytes) async throws {
-            do {
-                for try await event in stream.events {
-                    // Check if task has been cancelled
-                    if Task.isCancelled { break }
+            for try await byte in stream {
+                if Task.isCancelled { break }
 
-                    logger.trace(
-                        "SSE event received",
-                        metadata: [
-                            "type": "\(event.event ?? "message")",
-                            "id": "\(event.id ?? "none")",
-                        ]
-                    )
+                buffer.append(byte)
 
-                    // Convert the event data to Data and yield it to the message stream
-                    if !event.data.isEmpty, let data = event.data.data(using: .utf8) {
-                        messageContinuation.yield(data)
+                if String(bytes: [byte], encoding: .utf8) == "\n" {
+                    // Process complete lines
+                    Task(priority: .userInitiated) {
+                        guard let lines = String(bytes: buffer, encoding: .utf8)
+                        else {
+                            buffer.removeAll()
+                            return
+                        }
+                        buffer.removeAll()
+
+                        for line in lines.split(separator: "\n", omittingEmptySubsequences: false) {
+                            // Empty line marks the end of an event
+                            if line.isEmpty || line == "\r" || line == "\n" || line == "\r\n" {
+                                if !eventData.isEmpty {
+                                    // Process the event
+                                    if eventType == "id" {
+                                        lastEventID = eventID
+                                    } else if eventType == "endpoint" {
+                                        if let endpointCommunication {
+                                            if let newEndpoint = URL(string: "\(endpointCommunication.absoluteString)\(eventData)") {
+                                                endpointPostURL = newEndpoint
+                                                logger.info("Received new endpoint via SSE with endpointCommunication: \(newEndpoint.absoluteString)")
+                                            } else {
+                                                logger.error("Failed to construct new endpoint URL from SSE data: \(eventData)")
+                                            }
+                                        } else if let scheme = endpoint.scheme, let host = endpoint.host {
+                                            // Construct the new endpoint URL using the original scheme and host
+                                            let portString = endpoint.port.map { ":\($0)" } ?? ""
+                                            if let newEndpoint = URL(string: "\(scheme)://\(host)\(portString)\(eventData)") {
+                                                endpointPostURL = newEndpoint
+                                                logger.info("Received new endpoint via SSE: \(newEndpoint.absoluteString)")
+                                            } else {
+                                                logger.error("Failed to construct new endpoint URL from SSE data: \(eventData)")
+                                            }
+                                        } else {
+                                            logger.error("Original endpoint is missing scheme or host, cannot construct new endpoint.")
+                                        }
+                                    } else {
+                                        // Default event type is "message" if not specified
+                                        if let data = eventData.data(using: .utf8) {
+                                            logger.debug(
+                                                "SSE event received",
+                                                metadata: [
+                                                    "type": "\(eventType.isEmpty ? "message" : eventType)",
+                                                    "id": "\(eventID ?? "none")",
+                                                ]
+                                            )
+                                            messageContinuation.yield(data)
+                                        }
+                                    }
+
+                                    // Reset for next event
+                                    eventType = ""
+                                    eventData = ""
+                                }
+                                return
+                            }
+
+                            // Lines starting with ":" are comments
+                            if line.hasPrefix(":") { return }
+
+                            // Parse field: value format
+                            if let colonIndex = line.firstIndex(of: ":") {
+                                let field = String(line[..<colonIndex])
+                                var value = String(line[line.index(after: colonIndex)...])
+
+                                // Trim leading space
+                                if value.hasPrefix(" ") {
+                                    value = String(value.dropFirst())
+                                }
+
+                                // Process based on field
+                                switch field {
+                                case "event":
+                                    eventType = value
+
+                                case "data":
+                                    if !eventData.isEmpty {
+                                        eventData.append("\n")
+                                    }
+                                    eventData.append(value)
+
+                                case "id":
+                                    if !value.contains("\0") { // ID must not contain NULL
+                                        eventID = value
+                                        lastEventID = value
+                                    }
+
+                                case "retry":
+                                    // Retry timing not implemented
+                                    break
+
+                                default:
+                                    // Unknown fields are ignored per SSE spec
+                                    break
+                                }
+                            }
+                        }
                     }
                 }
-            } catch {
-                logger.error("Error processing SSE events: \(error)")
-                throw error
             }
         }
     #endif

@@ -3,9 +3,8 @@ import Logging
 import Foundation
 
 actor StreamableHTTPTransport: Transport {
-    var logger: Logging.Logger {
-        Logger(label: "mcp.transport.streamaable-http.client")
-    }
+    var logger: Logging.Logger =
+        Logger(label: "mcp.client.streamable-http.transport")
 
     var endpoint: URL
     var endpointCommunication: URL?
@@ -29,7 +28,8 @@ actor StreamableHTTPTransport: Transport {
     init(
         endpoint: URL,
         session: URLSession,
-        requestModifier: (@Sendable (URLRequest) async -> URLRequest)? = nil
+        requestModifier: (@Sendable (URLRequest) async -> URLRequest)? = nil,
+        logger: Logger? = nil
     ) {
         self.endpoint = endpoint
         endpointCommunication = endpoint
@@ -40,6 +40,12 @@ actor StreamableHTTPTransport: Transport {
 
         messageStream = stream
         messageContinuation = continuation
+
+        if let logger {
+            self.logger = logger
+        }
+
+        self.logger.info("Streamable HTTP client transport initialized sessionID == nil")
     }
 
     func connect() async throws {
@@ -114,13 +120,33 @@ actor StreamableHTTPTransport: Transport {
             throw MCPError.internalError("Invalid HTTP response")
         }
 
+        logger.info("""
+        RECEIVED HEADERS: \(httpResponse.statusCode)
+        \(httpResponse.allHeaderFields.map { "\($0.0): \($0.1)" }.joined(separator: "\n"))
+        """)
+
         // Process the response based on content type and status code
         let contentType = httpResponse.value(forHTTPHeaderField: "Content-Type") ?? ""
 
         // Extract session ID if present
         if let newSessionID = httpResponse.value(forHTTPHeaderField: "Mcp-Session-Id") {
             sessionID = newSessionID
-            logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
+            logger.info("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
+        }
+
+        func consumeBody(_ stream: URLSession.AsyncBytes) async -> String {
+            var data = Data()
+
+            do {
+                for try await byte in stream {
+                    data.append(byte)
+                }
+            } catch {
+                logger.error("Failed to read response body: \(error)")
+                return "<unreadable: \(error)>"
+            }
+
+            return String(data: data, encoding: .utf8) ?? "<nil>"
         }
 
         // Handle different response types
@@ -128,10 +154,11 @@ actor StreamableHTTPTransport: Transport {
         case 200, 201, 202:
             // For SSE, the processing happens in the streaming task
             if contentType.contains("text/event-stream") {
-                logger.debug("Received SSE response, processing in streaming task")
+                logger.info("Received SSE response, processing in streaming task")
 
                 let continuation = messageContinuation
                 try await decodeSSEStream(stream) { message in
+                    await self.logger.info("Received SSE message \(String(data: message, encoding: .utf8) ?? "<nil>")")
                     continuation.yield(message)
                 }
                 return
@@ -144,9 +171,14 @@ actor StreamableHTTPTransport: Transport {
                     data.append(byte)
                 }
 
-                logger.debug("Received JSON response", metadata: ["size": "\(data.count)"])
+                logger.info("Received JSON response \(String(data: data, encoding: .utf8) ?? "<nil>")")
                 messageContinuation.yield(data)
             }
+
+        case 400:
+            let rawBody = await consumeBody(stream)
+            logger.error("MCP invalid request body: \(rawBody)")
+            throw MCPError.invalidRequest(rawBody)
 
         case 401:
             let wwwAuthenticate = httpResponse.value(forHTTPHeaderField: "WWW-Authenticate")
@@ -321,7 +353,7 @@ actor StreamableHTTPTransport: Transport {
         request.httpMethod = "GET"
         request.addValue("text/event-stream", forHTTPHeaderField: "Accept")
 
-        request.addValue("2025-11-25", forHTTPHeaderField: "MCP-Protocol-Version")
+        request.addValue(Version.latest, forHTTPHeaderField: "MCP-Protocol-Version")
 
         // Add session ID if available
         if let sessionID {
@@ -337,13 +369,30 @@ actor StreamableHTTPTransport: Transport {
             request = await requestModifier(request)
         }
 
-        logger.debug("Starting SSE connection")
+        logger.info("Starting SSE connection")
+
+        logger.info("""
+        SENDING:
+        \(request.httpMethod ?? "") \(request.url?.absoluteString ?? "<no url>")
+        \(request.allHTTPHeaderFields?.map { "\($0.0): \($0.1)" }.joined(separator: "\n") ?? "")
+        """)
 
         // Create URLSession task for SSE
         let (stream, response) = try await session.bytes(for: request)
 
         guard let httpResponse = response as? HTTPURLResponse else {
             throw MCPError.internalError("Invalid HTTP response")
+        }
+
+        logger.info("""
+        RECEIVED HEADERS: \(httpResponse.statusCode)
+        \(httpResponse.allHeaderFields.map { "\($0.0): \($0.1)" }.joined(separator: "\n"))
+        """)
+
+        // Extract session ID if present
+        if let newSessionID = httpResponse.value(forHTTPHeaderField: "Mcp-Session-Id") {
+            logger.info("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
+            sessionID = newSessionID
         }
 
         func consumeBody(_ stream: URLSession.AsyncBytes) async throws -> String {
@@ -361,7 +410,7 @@ actor StreamableHTTPTransport: Transport {
         case 400:
             let rawBody = try? await consumeBody(stream)
             logger.error("MCP Connection invalid params BODY: \(rawBody ?? "<nil>")")
-            throw MCPError.invalidParams("Invalid parameters provided")
+            throw MCPError.invalidParams("Invalid parameters provided \(rawBody ?? "<nil>")")
 
         case 401:
             let wwwAuthenticateHeader = httpResponse.value(
@@ -374,15 +423,10 @@ actor StreamableHTTPTransport: Transport {
             throw MCPError.internalError("Endpoint not found")
 
         case 405:
-            throw MCPError.unsupportedMethod
+            throw MCPError.methodNotFound("Method not found")
 
         default:
             throw MCPError.internalError("HTTP error: \(httpResponse.statusCode)")
-        }
-
-        // Extract session ID if present
-        if let newSessionID = httpResponse.value(forHTTPHeaderField: "Mcp-Session-Id") {
-            sessionID = newSessionID
         }
 
         // Process the SSE stream
@@ -409,7 +453,7 @@ actor StreamableHTTPTransport: Transport {
                 eventListeningError = MCPError.unauthorized(wwwAuthenticateHeader)
                 logger.error("Unauthorized")
                 break
-            } catch MCPError.methodNotFound("Method not found") {
+            } catch MCPError.methodNotFound {
                 eventListeningError = MCPError.methodNotFound("Method not found")
                 logger.warning("Connection to MCP server does not support this method")
                 break

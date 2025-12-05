@@ -36,31 +36,31 @@ struct AnyMethod: Method, Sendable {
     typealias Result = Value
 }
 
-extension Method where Parameters == Empty {
-    public static func request(id: ID = .random) -> Request<Self> {
+public extension Method where Parameters == Empty {
+    static func request(id: ID = .random) -> Request<Self> {
         Request(id: id, method: name, params: Empty())
     }
 }
 
-extension Method where Result == Empty {
-    public static func response(id: ID) -> Response<Self> {
+public extension Method where Result == Empty {
+    static func response(id: ID) -> Response<Self> {
         Response(id: id, result: Empty())
     }
 }
 
-extension Method {
+public extension Method {
     /// Create a request with the given parameters.
-    public static func request(id: ID = .random, _ parameters: Self.Parameters) -> Request<Self> {
+    static func request(id: ID = .random, _ parameters: Self.Parameters) -> Request<Self> {
         Request(id: id, method: name, params: parameters)
     }
 
     /// Create a response with the given result.
-    public static func response(id: ID, result: Self.Result) -> Response<Self> {
+    static func response(id: ID, result: Self.Result) -> Response<Self> {
         Response(id: id, result: result)
     }
 
     /// Create a response with the given error.
-    public static func response(id: ID, error: MCPError) -> Response<Self> {
+    static func response(id: ID, error: MCPError) -> Response<Self> {
         Response(id: id, error: error)
     }
 }
@@ -95,22 +95,23 @@ public struct Request<M: Method>: Hashable, Identifiable, Codable, Sendable {
     }
 }
 
-extension Request {
-    public init(from decoder: Decoder) throws {
+public extension Request {
+    init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let version = try container.decode(String.self, forKey: .jsonrpc)
         guard version == jsonrpc else {
             throw DecodingError.dataCorruptedError(
-                forKey: .jsonrpc, in: container, debugDescription: "Invalid JSON-RPC version")
+                forKey: .jsonrpc, in: container, debugDescription: "Invalid JSON-RPC version"
+            )
         }
         id = try container.decode(ID.self, forKey: .id)
-        method = try container.decode(String.self, forKey: .method)
+        method = try container.decodeIfPresent(String.self, forKey: .method) ?? Initialize.name
 
         if M.Parameters.self is NotRequired.Type {
             // For NotRequired parameters, use decodeIfPresent or init()
-            params =
-                (try container.decodeIfPresent(M.Parameters.self, forKey: .params)
-                    ?? (M.Parameters.self as! NotRequired.Type).init() as! M.Parameters)
+            try params =
+                (container.decodeIfPresent(M.Parameters.self, forKey: .params)
+                        ?? (M.Parameters.self as! NotRequired.Type).init() as! M.Parameters)
         } else if let value = try? container.decode(M.Parameters.self, forKey: .params) {
             // If params exists and can be decoded, use it
             params = value
@@ -125,13 +126,15 @@ extension Request {
                 throw DecodingError.dataCorrupted(
                     DecodingError.Context(
                         codingPath: container.codingPath,
-                        debugDescription: "Missing required params field"))
+                        debugDescription: "Missing required params field"
+                    ))
             }
         } else {
             throw DecodingError.dataCorrupted(
                 DecodingError.Context(
                     codingPath: container.codingPath,
-                    debugDescription: "Invalid params field"))
+                    debugDescription: "Invalid params field"
+                ))
         }
     }
 }
@@ -151,7 +154,7 @@ extension AnyRequest {
 
 /// A box for request handlers that can be type-erased
 class RequestHandlerBox: @unchecked Sendable {
-    func callAsFunction(_ request: AnyRequest) async throws -> AnyResponse {
+    func callAsFunction(_: AnyRequest) async throws -> AnyResponse {
         fatalError("Must override")
     }
 }
@@ -161,7 +164,7 @@ final class TypedRequestHandler<M: Method>: RequestHandlerBox, @unchecked Sendab
     private let _handle: @Sendable (Request<M>) async throws -> Response<M>
 
     init(_ handler: @escaping @Sendable (Request<M>) async throws -> Response<M>) {
-        self._handle = handler
+        _handle = handler
         super.init()
     }
 
@@ -178,11 +181,11 @@ final class TypedRequestHandler<M: Method>: RequestHandlerBox, @unchecked Sendab
 
         // Convert result to AnyMethod response
         switch response.result {
-        case .success(let result):
+        case let .success(result):
             let resultData = try encoder.encode(result)
             let resultValue = try decoder.decode(Value.self, from: resultData)
             return Response(id: response.id, result: resultValue)
-        case .failure(let error):
+        case let .failure(error):
             return Response(id: response.id, error: error)
         }
     }
@@ -204,7 +207,7 @@ public struct Response<M: Method>: Hashable, Identifiable, Codable, Sendable {
 
     public init(id: ID, error: MCPError) {
         self.id = id
-        self.result = .failure(error)
+        result = .failure(error)
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -216,9 +219,9 @@ public struct Response<M: Method>: Hashable, Identifiable, Codable, Sendable {
         try container.encode(jsonrpc, forKey: .jsonrpc)
         try container.encode(id, forKey: .id)
         switch result {
-        case .success(let result):
+        case let .success(result):
             try container.encode(result, forKey: .result)
-        case .failure(let error):
+        case let .failure(error):
             try container.encode(error, forKey: .error)
         }
     }
@@ -228,18 +231,20 @@ public struct Response<M: Method>: Hashable, Identifiable, Codable, Sendable {
         let version = try container.decode(String.self, forKey: .jsonrpc)
         guard version == jsonrpc else {
             throw DecodingError.dataCorruptedError(
-                forKey: .jsonrpc, in: container, debugDescription: "Invalid JSON-RPC version")
+                forKey: .jsonrpc, in: container, debugDescription: "Invalid JSON-RPC version"
+            )
         }
         id = try container.decode(ID.self, forKey: .id)
         if let result = try? container.decode(M.Result.self, forKey: .result) {
             self.result = .success(result)
         } else if let error = try? container.decode(MCPError.self, forKey: .error) {
-            self.result = .failure(error)
+            result = .failure(error)
         } else {
             throw DecodingError.dataCorrupted(
                 DecodingError.Context(
                     codingPath: container.codingPath,
-                    debugDescription: "Invalid response"))
+                    debugDescription: "Invalid response"
+                ))
         }
     }
 }
@@ -251,16 +256,16 @@ extension AnyResponse {
     init<T: Method>(_ response: Response<T>) throws {
         // Instead of re-encoding/decoding which might double-wrap the error,
         // directly transfer the properties
-        self.id = response.id
+        id = response.id
         switch response.result {
-        case .success(let result):
+        case let .success(result):
             // For success, we still need to convert the result to a Value
             let data = try JSONEncoder().encode(result)
             let resultValue = try JSONDecoder().decode(Value.self, from: data)
             self.result = .success(resultValue)
-        case .failure(let error):
+        case let .failure(error):
             // Keep the original error without re-encoding/decoding
-            self.result = .failure(error)
+            result = .failure(error)
         }
     }
 }
@@ -321,7 +326,8 @@ public struct Message<N: Notification>: Hashable, Codable, Sendable {
         let version = try container.decode(String.self, forKey: .jsonrpc)
         guard version == jsonrpc else {
             throw DecodingError.dataCorruptedError(
-                forKey: .jsonrpc, in: container, debugDescription: "Invalid JSON-RPC version")
+                forKey: .jsonrpc, in: container, debugDescription: "Invalid JSON-RPC version"
+            )
         }
         method = try container.decode(String.self, forKey: .method)
 
@@ -343,13 +349,15 @@ public struct Message<N: Notification>: Hashable, Codable, Sendable {
                 throw DecodingError.dataCorrupted(
                     DecodingError.Context(
                         codingPath: container.codingPath,
-                        debugDescription: "Missing required params field"))
+                        debugDescription: "Missing required params field"
+                    ))
             }
         } else {
             throw DecodingError.dataCorrupted(
                 DecodingError.Context(
                     codingPath: container.codingPath,
-                    debugDescription: "Invalid params field"))
+                    debugDescription: "Invalid params field"
+                ))
         }
     }
 }
@@ -357,23 +365,23 @@ public struct Message<N: Notification>: Hashable, Codable, Sendable {
 /// A type-erased message for message handling
 typealias AnyMessage = Message<AnyNotification>
 
-extension Notification where Parameters == Empty {
+public extension Notification where Parameters == Empty {
     /// Create a message with empty parameters.
-    public static func message() -> Message<Self> {
+    static func message() -> Message<Self> {
         Message(method: name, params: Empty())
     }
 }
 
-extension Notification {
+public extension Notification {
     /// Create a message with the given parameters.
-    public static func message(_ parameters: Parameters) -> Message<Self> {
+    static func message(_ parameters: Parameters) -> Message<Self> {
         Message(method: name, params: parameters)
     }
 }
 
 /// A box for notification handlers that can be type-erased
 class NotificationHandlerBox: @unchecked Sendable {
-    func callAsFunction(_ notification: Message<AnyNotification>) async throws {}
+    func callAsFunction(_: Message<AnyNotification>) async throws {}
 }
 
 /// A typed notification handler that can be used to handle notifications of a specific type
@@ -383,7 +391,7 @@ final class TypedNotificationHandler<N: Notification>: NotificationHandlerBox,
     private let _handle: @Sendable (Message<N>) async throws -> Void
 
     init(_ handler: @escaping @Sendable (Message<N>) async throws -> Void) {
-        self._handle = handler
+        _handle = handler
         super.init()
     }
 
