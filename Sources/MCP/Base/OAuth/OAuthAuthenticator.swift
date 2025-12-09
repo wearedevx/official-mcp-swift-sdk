@@ -265,11 +265,12 @@ public actor OAuthAuthenticator {
             return try await existingTask.value
         }
 
-        guard let refreshToken = token.refreshToken,
-              let clientId = token.clientId
+        guard let refreshToken = token.refreshToken
         else {
             throw OAuthError.refreshTokenNotAvailable
         }
+
+        let clientId = self.configuration.clientId
 
         logger.info("Refreshing access token", metadata: ["identifier": "\(identifier)", "token-endpoint": "\(configuration.tokenEndpoint.absoluteString)"])
 
