@@ -2,8 +2,8 @@ import Logging
 
 import Foundation
 
-actor StreamableHTTPTransport: Transport {
-    var logger: Logging.Logger =
+public actor StreamableHTTPTransport: Transport {
+    public var logger: Logging.Logger =
         Logger(label: "mcp.client.streamable-http.transport")
 
     var endpoint: URL
@@ -26,7 +26,7 @@ actor StreamableHTTPTransport: Transport {
     private var messageStream: AsyncThrowingStream<Data, Swift.Error>
     private var messageContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
 
-    init(
+    public init(
         endpoint: URL,
         session: URLSession,
         requestModifier: (@Sendable (URLRequest) async -> URLRequest)? = nil,
@@ -60,7 +60,7 @@ actor StreamableHTTPTransport: Transport {
         return URLSession(configuration: listenerConfiguration)
     }
 
-    func connect() async throws {
+    public func connect() async throws {
         eventListeningError = nil
 
         guard !isConnected else { return }
@@ -89,7 +89,7 @@ actor StreamableHTTPTransport: Transport {
         logger.info("HTTP transport connected")
     }
 
-    func disconnect() async {
+    public func disconnect() async {
         messageContinuation.finish()
         isConnected = false
 
@@ -101,7 +101,7 @@ actor StreamableHTTPTransport: Transport {
         logger.info("HTTP clienttransport disconnected")
     }
 
-    func send(_ data: Data) async throws {
+    public func send(_ data: Data) async throws {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
         request.addValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
@@ -121,7 +121,7 @@ actor StreamableHTTPTransport: Transport {
         let repr = """
         \(request.httpMethod ?? "") \(request.url?.absoluteString ?? "<no url>")
         \(request.allHTTPHeaderFields?.map { "\($0.0): \($0.1)" }.joined(separator: "\n") ?? "")
-
+        
         \(String(data: data, encoding: .utf8) ?? "<no-data>")
         """
 
@@ -214,7 +214,7 @@ actor StreamableHTTPTransport: Transport {
         }
     }
 
-    func receive() -> AsyncThrowingStream<Data, Swift.Error> {
+    public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
         // Finish any existing stream/coninaution and create a new one,
         // because we can't more than one task listening of het same stream
         messageContinuation.finish()
@@ -299,7 +299,7 @@ actor StreamableHTTPTransport: Transport {
                                             metadata: [
                                                 "type":
                                                     "\(eventType.isEmpty ? "message" : eventType)",
-                                                "id": "\(eventID ?? "none")",
+                                                "id": "\(eventID ?? "none")"
                                             ]
                                         )
                                         await handleMessage(data)

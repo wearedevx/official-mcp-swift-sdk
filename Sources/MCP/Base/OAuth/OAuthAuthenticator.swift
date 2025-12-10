@@ -219,12 +219,7 @@ public actor OAuthAuthenticator {
     }
 
     /// Perform client credentials flow authentication (for confidential clients only)
-    public func authenticateWithClientCredentials(identifier: String = "default") async throws -> OAuthToken {
-        // OAuth 2.1: Client credentials flow is only for confidential clients
-        guard configuration.clientType == .confidential else {
-            throw OAuthError.clientCredentialsNotAllowedForPublicClients
-        }
-
+    public func authenticateWithClientCredentials(identifier: String = "default", pkceState: PKCEState? = nil) async throws -> OAuthToken {
         logger.info("Performing client credentials authentication")
         let token = try await withCheckedThrowingContinuation { continuation in
             var parameters: OAuthSwift.Parameters = [:]
@@ -237,7 +232,7 @@ public actor OAuthAuthenticator {
             oauthSwift.authorize(
                 withCallbackURL: self.configuration.redirectURI,
                 scope: self.configuration.scopes.joined(separator: " "),
-                state: "state",
+                state: pkceState?.state ?? "state",
                 parameters: parameters
             ) { result in
                 switch result {

@@ -132,6 +132,19 @@ public actor HTTPClientTransport: Actor, Transport {
             request = await requestModifier(request)
         }
 
+        let headers = request.allHTTPHeaderFields ?? [:]
+        let headerPairs = headers.map { key, value in "\(key): \(value)" }
+        let headerBlock = headerPairs.joined(separator: "\n")
+
+        let repr = """
+        \(request.httpMethod ?? "GET") \(request.url?.absoluteString ?? "<nil>") ---
+        \(headerBlock)
+        
+        \(String(data: data ?? Data(), encoding: .utf8))
+        """
+
+        logger.info("\(repr)")
+
         let (responseData, response) = try await session.data(for: request)
 
         guard let httpResponse = response as? HTTPURLResponse else {
@@ -278,14 +291,18 @@ public actor HTTPClientTransport: Actor, Transport {
 
             switch httpResponse.statusCode {
             case 200: break
+
             case 400:
                 let rawBody = await consumeBody(stream)
                 throw MCPError.invalidParams("Invalid parameters provided \(rawBody)")
+
             case 401:
                 let wwwAuthHeader = httpResponse.value(forHTTPHeaderField: "WWW-Authenticate")
                 throw MCPError.unauthorized(wwwAuthHeader)
+
             case 405:
                 throw MCPError.methodNotFound("Method not found")
+
             default:
                 throw MCPError.internalError("HTTP error: \(httpResponse.statusCode)")
             }
@@ -350,7 +367,7 @@ public actor HTTPClientTransport: Actor, Transport {
                                                 "SSE event received",
                                                 metadata: [
                                                     "type": "\(eventType.isEmpty ? "message" : eventType)",
-                                                    "id": "\(eventID ?? "none")",
+                                                    "id": "\(eventID ?? "none")"
                                                 ]
                                             )
                                             messageContinuation.yield(data)
