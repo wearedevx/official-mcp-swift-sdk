@@ -178,20 +178,15 @@ public actor OAuthHTTPClientTransport: Transport {
             baseTransport = StreamableHTTPTransport(
                 endpoint: endpoint,
                 session: session,
-                requestModifier: { [weak tokenStorage] req async -> URLRequest in
-                    guard let tokenStorage
-                    else { return req }
-
+                requestModifier: { [authenticator, tokenIdentifier] req async -> URLRequest in
                     var request = req
-
-                    if let token = try? await tokenStorage.retrieve(for: tokenIdentifier) {
-                        request
-                            .setValue(
-                                "\(token.tokenType.capitalized) \(token.accessToken)",
-                                forHTTPHeaderField: "Authorization"
-                            )
+                    // Use getValidToken to ensure we always have a fresh token (refreshing if needed)
+                    if let token = try? await authenticator.getValidToken(for: tokenIdentifier) {
+                        request.setValue(
+                            "\(token.tokenType.capitalized) \(token.accessToken)",
+                            forHTTPHeaderField: "Authorization"
+                        )
                     }
-
                     return request
                 },
                 logger: self.logger
@@ -201,20 +196,15 @@ public actor OAuthHTTPClientTransport: Transport {
                 endpoint: endpoint,
                 session: session,
                 streaming: true,
-                requestModifier: { [weak tokenStorage] req async -> URLRequest in
-                    guard let tokenStorage
-                    else { return req }
-
+                requestModifier: { [authenticator, tokenIdentifier] req async -> URLRequest in
                     var request = req
-
-                    if let token = try? await tokenStorage.retrieve(for: tokenIdentifier) {
-                        request
-                            .setValue(
-                                "\(token.tokenType.capitalized) \(token.accessToken)",
-                                forHTTPHeaderField: "Authorization"
-                            )
+                    // Use getValidToken to ensure we always have a fresh token (refreshing if needed)
+                    if let token = try? await authenticator.getValidToken(for: tokenIdentifier) {
+                        request.setValue(
+                            "\(token.tokenType.capitalized) \(token.accessToken)",
+                            forHTTPHeaderField: "Authorization"
+                        )
                     }
-
                     return request
                 },
                 logger: logger
@@ -233,22 +223,30 @@ public actor OAuthHTTPClientTransport: Transport {
         headers["Authorization"] = "\(token.tokenType) \(token.accessToken)"
         config.httpAdditionalHeaders = headers
 
-        // Create a new session with the updated configuration
+        // Create a new authenticated session
         let authenticatedSession = URLSession(configuration: config)
 
         // Clear existing stream so next receive() gets a fresh one
         currentStream = nil
 
+        // Re-create the request modifiers to use the authenticator for token refreshment
+        // We capture the authenticator and identifier to allow dynamic token retrieval
+        let authenticator = self.authenticator
+        let tokenIdentifier = self.tokenIdentifier
+
         if streamableHTTP {
             baseTransport = StreamableHTTPTransport(
                 endpoint: endpoint,
                 session: authenticatedSession,
-                requestModifier: { request in
-                    var request = request
-                    request.setValue(
-                        "\(token.tokenType.capitalized) \(token.accessToken)",
-                        forHTTPHeaderField: "Authorization"
-                    )
+                requestModifier: { [authenticator, tokenIdentifier] req async -> URLRequest in
+                    var request = req
+                    // Use getValidToken to ensure we always have a fresh token (refreshing if needed)
+                    if let token = try? await authenticator.getValidToken(for: tokenIdentifier) {
+                        request.setValue(
+                            "\(token.tokenType.capitalized) \(token.accessToken)",
+                            forHTTPHeaderField: "Authorization"
+                        )
+                    }
                     return request
                 },
                 logger: logger
@@ -259,12 +257,15 @@ public actor OAuthHTTPClientTransport: Transport {
                 endpoint: endpoint,
                 session: authenticatedSession,
                 streaming: streaming,
-                requestModifier: { request in
-                    var request = request
-                    request.setValue(
-                        "\(token.tokenType.capitalized) \(token.accessToken)",
-                        forHTTPHeaderField: "Authorization"
-                    )
+                requestModifier: { [authenticator, tokenIdentifier] req async -> URLRequest in
+                    var request = req
+                    // Use getValidToken to ensure we always have a fresh token (refreshing if needed)
+                    if let token = try? await authenticator.getValidToken(for: tokenIdentifier) {
+                        request.setValue(
+                            "\(token.tokenType.capitalized) \(token.accessToken)",
+                            forHTTPHeaderField: "Authorization"
+                        )
+                    }
                     return request
                 },
                 logger: logger
