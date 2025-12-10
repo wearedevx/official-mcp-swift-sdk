@@ -59,10 +59,10 @@ public actor HTTPClientTransport: Actor, Transport {
 
         self.logger =
             logger
-                ?? Logger(
-                    label: "mcp.transport.http.client",
-                    factory: { _ in SwiftLogNoOpLogHandler() }
-                )
+            ?? Logger(
+                label: "mcp.transport.http.client",
+                factory: { _ in SwiftLogNoOpLogHandler() }
+            )
         self.endpointCommunication = endpointCommunication
     }
 
@@ -77,8 +77,8 @@ public actor HTTPClientTransport: Actor, Transport {
         }
 
         // wait for the connection to happen with a valid endpoint
-        let timeoutNs = 45_000_000_000 // 45 seconds
-        let sleepIntervalNs: UInt64 = 50_000_000 // 50 ms
+        let timeoutNs = 45_000_000_000  // 45 seconds
+        let sleepIntervalNs: UInt64 = 50_000_000  // 50 ms
         var elapsedNs: UInt64 = 0
 
         while endpointPostURL == nil {
@@ -137,11 +137,11 @@ public actor HTTPClientTransport: Actor, Transport {
         let headerBlock = headerPairs.joined(separator: "\n")
 
         let repr = """
-        \(request.httpMethod ?? "GET") \(request.url?.absoluteString ?? "<nil>") ---
-        \(headerBlock)
-        
-        \(String(data: data ?? Data(), encoding: .utf8))
-        """
+            \(request.httpMethod ?? "GET") \(request.url?.absoluteString ?? "<nil>") ---
+            \(headerBlock)
+
+            \(String(data: data, encoding: .utf8) ?? "")
+            """
 
         logger.info("\(repr)")
 
@@ -235,7 +235,7 @@ public actor HTTPClientTransport: Actor, Transport {
                 if !Task.isCancelled {
                     logger.error("SSE connection error: \(error)")
                     // Wait before retrying
-                    try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)  // 1 second
                 }
             }
         }
@@ -342,23 +342,41 @@ public actor HTTPClientTransport: Actor, Transport {
                                         lastEventID = eventID
                                     } else if eventType == "endpoint" {
                                         if let endpointCommunication {
-                                            if let newEndpoint = URL(string: "\(endpointCommunication.absoluteString)\(eventData)") {
+                                            if let newEndpoint = URL(
+                                                string:
+                                                    "\(endpointCommunication.absoluteString)\(eventData)"
+                                            ) {
                                                 endpointPostURL = newEndpoint
-                                                logger.info("Received new endpoint via SSE with endpointCommunication: \(newEndpoint.absoluteString)")
+                                                logger.info(
+                                                    "Received new endpoint via SSE with endpointCommunication: \(newEndpoint.absoluteString)"
+                                                )
                                             } else {
-                                                logger.error("Failed to construct new endpoint URL from SSE data: \(eventData)")
+                                                logger.error(
+                                                    "Failed to construct new endpoint URL from SSE data: \(eventData)"
+                                                )
                                             }
-                                        } else if let scheme = endpoint.scheme, let host = endpoint.host {
+                                        } else if let scheme = endpoint.scheme,
+                                            let host = endpoint.host
+                                        {
                                             // Construct the new endpoint URL using the original scheme and host
                                             let portString = endpoint.port.map { ":\($0)" } ?? ""
-                                            if let newEndpoint = URL(string: "\(scheme)://\(host)\(portString)\(eventData)") {
+                                            if let newEndpoint = URL(
+                                                string:
+                                                    "\(scheme)://\(host)\(portString)\(eventData)")
+                                            {
                                                 endpointPostURL = newEndpoint
-                                                logger.info("Received new endpoint via SSE: \(newEndpoint.absoluteString)")
+                                                logger.info(
+                                                    "Received new endpoint via SSE: \(newEndpoint.absoluteString)"
+                                                )
                                             } else {
-                                                logger.error("Failed to construct new endpoint URL from SSE data: \(eventData)")
+                                                logger.error(
+                                                    "Failed to construct new endpoint URL from SSE data: \(eventData)"
+                                                )
                                             }
                                         } else {
-                                            logger.error("Original endpoint is missing scheme or host, cannot construct new endpoint.")
+                                            logger.error(
+                                                "Original endpoint is missing scheme or host, cannot construct new endpoint."
+                                            )
                                         }
                                     } else {
                                         // Default event type is "message" if not specified
@@ -366,8 +384,9 @@ public actor HTTPClientTransport: Actor, Transport {
                                             logger.debug(
                                                 "SSE event received",
                                                 metadata: [
-                                                    "type": "\(eventType.isEmpty ? "message" : eventType)",
-                                                    "id": "\(eventID ?? "none")"
+                                                    "type":
+                                                        "\(eventType.isEmpty ? "message" : eventType)",
+                                                    "id": "\(eventID ?? "none")",
                                                 ]
                                             )
                                             messageContinuation.yield(data)
@@ -406,7 +425,7 @@ public actor HTTPClientTransport: Actor, Transport {
                                     eventData.append(value)
 
                                 case "id":
-                                    if !value.contains("\0") { // ID must not contain NULL
+                                    if !value.contains("\0") {  // ID must not contain NULL
                                         eventID = value
                                         lastEventID = value
                                     }

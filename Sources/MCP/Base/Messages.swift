@@ -20,7 +20,7 @@ extension Value: NotRequired {
 // MARK: -
 
 /// A method that can be used to send requests and receive responses.
-public protocol Method {
+public protocol Method: Sendable {
     /// The parameters of the method.
     associatedtype Parameters: Codable, Hashable, Sendable = Empty
     /// The result of the method.
@@ -36,31 +36,31 @@ struct AnyMethod: Method, Sendable {
     typealias Result = Value
 }
 
-public extension Method where Parameters == Empty {
-    static func request(id: ID = .random) -> Request<Self> {
+extension Method where Parameters == Empty {
+    public static func request(id: ID = .random) -> Request<Self> {
         Request(id: id, method: name, params: Empty())
     }
 }
 
-public extension Method where Result == Empty {
-    static func response(id: ID) -> Response<Self> {
+extension Method where Result == Empty {
+    public static func response(id: ID) -> Response<Self> {
         Response(id: id, result: Empty())
     }
 }
 
-public extension Method {
+extension Method {
     /// Create a request with the given parameters.
-    static func request(id: ID = .random, _ parameters: Self.Parameters) -> Request<Self> {
+    public static func request(id: ID = .random, _ parameters: Self.Parameters) -> Request<Self> {
         Request(id: id, method: name, params: parameters)
     }
 
     /// Create a response with the given result.
-    static func response(id: ID, result: Self.Result) -> Response<Self> {
+    public static func response(id: ID, result: Self.Result) -> Response<Self> {
         Response(id: id, result: result)
     }
 
     /// Create a response with the given error.
-    static func response(id: ID, error: MCPError) -> Response<Self> {
+    public static func response(id: ID, error: MCPError) -> Response<Self> {
         Response(id: id, error: error)
     }
 }
@@ -95,8 +95,8 @@ public struct Request<M: Method>: Hashable, Identifiable, Codable, Sendable {
     }
 }
 
-public extension Request {
-    init(from decoder: Decoder) throws {
+extension Request {
+    public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let version = try container.decode(String.self, forKey: .jsonrpc)
         guard version == jsonrpc else {
@@ -111,7 +111,7 @@ public extension Request {
             // For NotRequired parameters, use decodeIfPresent or init()
             try params =
                 (container.decodeIfPresent(M.Parameters.self, forKey: .params)
-                        ?? (M.Parameters.self as! NotRequired.Type).init() as! M.Parameters)
+                    ?? (M.Parameters.self as! NotRequired.Type).init() as! M.Parameters)
         } else if let value = try? container.decode(M.Parameters.self, forKey: .params) {
             // If params exists and can be decoded, use it
             params = value
@@ -181,11 +181,11 @@ final class TypedRequestHandler<M: Method>: RequestHandlerBox, @unchecked Sendab
 
         // Convert result to AnyMethod response
         switch response.result {
-        case let .success(result):
+        case .success(let result):
             let resultData = try encoder.encode(result)
             let resultValue = try decoder.decode(Value.self, from: resultData)
             return Response(id: response.id, result: resultValue)
-        case let .failure(error):
+        case .failure(let error):
             return Response(id: response.id, error: error)
         }
     }
@@ -219,9 +219,9 @@ public struct Response<M: Method>: Hashable, Identifiable, Codable, Sendable {
         try container.encode(jsonrpc, forKey: .jsonrpc)
         try container.encode(id, forKey: .id)
         switch result {
-        case let .success(result):
+        case .success(let result):
             try container.encode(result, forKey: .result)
-        case let .failure(error):
+        case .failure(let error):
             try container.encode(error, forKey: .error)
         }
     }
@@ -258,12 +258,12 @@ extension AnyResponse {
         // directly transfer the properties
         id = response.id
         switch response.result {
-        case let .success(result):
+        case .success(let result):
             // For success, we still need to convert the result to a Value
             let data = try JSONEncoder().encode(result)
             let resultValue = try JSONDecoder().decode(Value.self, from: data)
             self.result = .success(resultValue)
-        case let .failure(error):
+        case .failure(let error):
             // Keep the original error without re-encoding/decoding
             result = .failure(error)
         }
@@ -365,16 +365,16 @@ public struct Message<N: Notification>: Hashable, Codable, Sendable {
 /// A type-erased message for message handling
 typealias AnyMessage = Message<AnyNotification>
 
-public extension Notification where Parameters == Empty {
+extension Notification where Parameters == Empty {
     /// Create a message with empty parameters.
-    static func message() -> Message<Self> {
+    public static func message() -> Message<Self> {
         Message(method: name, params: Empty())
     }
 }
 
-public extension Notification {
+extension Notification {
     /// Create a message with the given parameters.
-    static func message(_ parameters: Parameters) -> Message<Self> {
+    public static func message(_ parameters: Parameters) -> Message<Self> {
         Message(method: name, params: parameters)
     }
 }

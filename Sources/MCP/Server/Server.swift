@@ -35,7 +35,8 @@ public actor Server {
         public let version: String
         public let websiteUrl: String?
 
-        public init(name: String, title: String? = nil, version: String, websiteUrl: String? = nil) {
+        public init(name: String, title: String? = nil, version: String, websiteUrl: String? = nil)
+        {
             self.name = name
             self.title = title
             self.version = version
@@ -178,7 +179,7 @@ public actor Server {
             do {
                 let stream = await transport.receive()
                 for try await data in stream {
-                    if Task.isCancelled { break } // Check cancellation inside loop
+                    if Task.isCancelled { break }  // Check cancellation inside loop
 
                     var requestID: ID?
                     do {
@@ -331,20 +332,21 @@ public actor Server {
         for item in batch.items {
             do {
                 switch item {
-                case let .request(request):
+                case .request(let request):
                     // For batched requests, collect responses instead of sending immediately
                     if let response = try await handleRequest(request, sendResponse: false) {
                         responses.append(response)
                     }
 
-                case let .notification(notification):
+                case .notification(let notification):
                     // Handle notification (no response needed)
                     try await handleMessage(notification)
                 }
             } catch {
                 // Only add errors to response for requests (notifications don't have responses)
-                if case let .request(request) = item {
-                    let mcpError = error as? MCPError ?? MCPError.internalError(error.localizedDescription)
+                if case .request(let request) = item {
+                    let mcpError =
+                        error as? MCPError ?? MCPError.internalError(error.localizedDescription)
                     responses.append(AnyMethod.response(id: request.id, error: mcpError))
                 }
             }
@@ -372,7 +374,9 @@ public actor Server {
     ///   - request: The request to handle
     ///   - sendResponse: Whether to send the response immediately (true) or return it (false)
     /// - Returns: The response when sendResponse is false
-    private func handleRequest(_ request: Request<AnyMethod>, sendResponse: Bool = true) async throws -> Response<AnyMethod>? {
+    private func handleRequest(_ request: Request<AnyMethod>, sendResponse: Bool = true)
+        async throws -> Response<AnyMethod>?
+    {
         // Check if this is a pre-processed error request (empty method)
         if request.method.isEmpty, !sendResponse {
             // This is a placeholder for an invalid request that couldn't be parsed in batch mode
@@ -575,11 +579,10 @@ extension Server.Batch.Item: Codable {
 
     func encode(to encoder: Encoder) throws {
         switch self {
-        case let .request(request):
+        case .request(let request):
             try request.encode(to: encoder)
-        case let .notification(notification):
+        case .notification(let notification):
             try notification.encode(to: encoder)
         }
     }
 }
-
