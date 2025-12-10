@@ -37,7 +37,7 @@ public actor OAuthAuthenticator {
         self.logger = logger ?? Logger(label: "mcp.oauth.authenticator")
 
         // Initialize OAuth2Swift
-        self.oauthSwift = OAuth2Swift(
+        oauthSwift = OAuth2Swift(
             consumerKey: configuration.clientId,
             consumerSecret: configuration.clientSecret ?? "",
             authorizeUrl: configuration.authorizationEndpoint.absoluteString,
@@ -137,24 +137,24 @@ public actor OAuthAuthenticator {
             case .stateMismatch: return "State mismatch causing potential CSRF issue"
             case .authenticationRequired: return "Authentication required"
             case .refreshTokenNotAvailable: return "Refresh token not available"
-            case .pkceNotSupported(let reason): return "PKCE not supported: \(reason)"
-            case .invalidDiscoveryDocument(let reason):
+            case let .pkceNotSupported(reason): return "PKCE not supported: \(reason)"
+            case let .invalidDiscoveryDocument(reason):
                 return "Invalid discovery document: \(reason)"
-            case .protectedResourceMetadataFailed(let code, let body):
+            case let .protectedResourceMetadataFailed(code, body):
                 return "Protected resource metadata request failed: \(code), \(body)"
-            case .invalidProtectedResourceMetadata(let reason):
+            case let .invalidProtectedResourceMetadata(reason):
                 return "Invalid protected resource metadata: \(reason)"
-            case .tokenRequestFailed(let code, let body):
+            case let .tokenRequestFailed(code, body):
                 return "Token request failed: \(code), \(body)"
-            case .invalidTokenResponse(let reason): return "Invalid token response: \(reason)"
-            case .invalidWWWAuthenticateHeader(let reason):
+            case let .invalidTokenResponse(reason): return "Invalid token response: \(reason)"
+            case let .invalidWWWAuthenticateHeader(reason):
                 return "Invalid WWW-Authenticate header: \(reason)"
-            case .clientRegistrationFailed(let code, let body):
+            case let .clientRegistrationFailed(code, body):
                 return "Client registration failed: \(code), \(body)"
             case .registrationEndpointNotFound: return "Registration endpoint not found"
-            case .invalidClientRegistrationResponse(let reason):
+            case let .invalidClientRegistrationResponse(reason):
                 return "Invalid client registration response: \(reason)"
-            case .invalidConfiguration(let reason): return "Invalid configuration: \(reason)"
+            case let .invalidConfiguration(reason): return "Invalid configuration: \(reason)"
             }
         }
     }
@@ -217,7 +217,7 @@ public actor OAuthAuthenticator {
                 }
 
                 switch result {
-                case .success(let (credential, _, _)):
+                case let .success((credential, _, _)):
                     let accessToken = credential.oauthToken
                     let refreshToken = credential.oauthRefreshToken
                     let expiresAt = credential.oauthTokenExpiresAt
@@ -231,7 +231,7 @@ public actor OAuthAuthenticator {
                             continuation: continuation
                         )
                     }
-                case .failure(let error):
+                case let .failure(error):
                     Task {
                         await self.handleAuthenticationFailure(error, continuation: continuation)
                     }
@@ -245,19 +245,20 @@ public actor OAuthAuthenticator {
         continuation: CheckedContinuation<OAuthToken, Swift.Error>
     ) async {
         // Create token from credential
-        let token = self.createToken(
-            accessToken: accessToken, refreshToken: refreshToken, expiresAt: expiresAt)
+        let token = createToken(
+            accessToken: accessToken, refreshToken: refreshToken, expiresAt: expiresAt
+        )
 
         // Store token
-        try? await self.tokenStorage.store(token: token, for: identifier)
-        self.currentToken = token
+        try? await tokenStorage.store(token: token, for: identifier)
+        currentToken = token
         continuation.resume(returning: token)
     }
 
     private func handleAuthenticationFailure(
         _ error: Swift.Error, continuation: CheckedContinuation<OAuthToken, Swift.Error>
     ) {
-        self.logger.error("Authentication failed: \(error)")
+        logger.error("Authentication failed: \(error)")
         continuation.resume(throwing: error)
     }
 
@@ -275,7 +276,6 @@ public actor OAuthAuthenticator {
 
         // Try to load token from storage
         if let storedToken = try await tokenStorage.retrieve(for: identifier) {
-
             // Check if stored token has valid configuration URLs that improve upon our current config
             // (e.g. if we are using dummy URLs from initialization)
             let hasBetterConfig =
@@ -289,19 +289,25 @@ public actor OAuthAuthenticator {
                 if storedAuthEndpoint != configuration.authorizationEndpoint
                     || storedTokenEndpoint != configuration.tokenEndpoint
                 {
-
                     logger.info("Restoring OAuth configuration from stored token")
 
                     do {
                         // Create updated configuration
+                        // Use stored client_id from token (fixes issue where dummy client_id from dynamic discovery
+                        // would be used instead of the real registered client_id after app restart)
+                        let restoredClientId = storedToken.clientId ?? configuration.clientId
+
+                        // Parse stored scopes from token if available, otherwise use configuration scopes
+                        let restoredScopes = storedToken.scope?.components(separatedBy: " ").filter { !$0.isEmpty } ?? configuration.scopes
+
                         let newConfig = try OAuthConfiguration(
                             authorizationEndpoint: storedAuthEndpoint,
                             tokenEndpoint: storedTokenEndpoint,
                             revocationEndpoint: configuration.revocationEndpoint,
-                            clientId: configuration.clientId,
+                            clientId: restoredClientId,
                             clientSecret: configuration.clientSecret,
                             clientType: configuration.clientType,
-                            scopes: configuration.scopes,
+                            scopes: restoredScopes,
                             redirectURI: configuration.redirectURI,
                             additionalParameters: configuration.additionalParameters,
                             usePKCE: configuration.usePKCE,
@@ -309,10 +315,10 @@ public actor OAuthAuthenticator {
                             resourceIndicator: configuration.resourceIndicator
                         )
 
-                        self.configuration = newConfig
+                        configuration = newConfig
 
                         // Re-initialize OAuthSwift with the new endpoints
-                        self.oauthSwift = OAuth2Swift(
+                        oauthSwift = OAuth2Swift(
                             consumerKey: newConfig.clientId,
                             consumerSecret: newConfig.clientSecret ?? "",
                             authorizeUrl: newConfig.authorizationEndpoint.absoluteString,
@@ -358,7 +364,7 @@ public actor OAuthAuthenticator {
         logger.info("Refreshing access token")
 
         let task = Task<OAuthToken, Swift.Error> {
-            return try await withCheckedThrowingContinuation {
+            try await withCheckedThrowingContinuation {
                 (continuation: CheckedContinuation<OAuthToken, Swift.Error>) in
                 // Set the current credential in OAuthSwift so it knows what to refresh if needed,
                 // mostly to ensure the client has the consumer key/secret context.
@@ -382,7 +388,7 @@ public actor OAuthAuthenticator {
                     }
 
                     switch result {
-                    case .success(let (credential, _, _)):
+                    case let .success((credential, _, _)):
                         let accessToken = credential.oauthToken
                         let refreshToken = credential.oauthRefreshToken
                         let expiresAt = credential.oauthTokenExpiresAt
@@ -396,10 +402,11 @@ public actor OAuthAuthenticator {
                                 continuation: continuation
                             )
                         }
-                    case .failure(let error):
+                    case let .failure(error):
                         Task {
                             await self.handleAuthenticationFailure(
-                                error, continuation: continuation)
+                                error, continuation: continuation
+                            )
                         }
                     }
                 }
@@ -471,18 +478,19 @@ public actor OAuthAuthenticator {
         let expiresIn = expiresAt?.timeIntervalSince(now).rounded() ?? 0
         return OAuthToken(
             accessToken: accessToken,
-            tokenType: "Bearer",  // OAuthSwift usually handles Bearer tokens
+            tokenType: "Bearer", // OAuthSwift usually handles Bearer tokens
             expiresIn: Int(expiresIn),
             refreshToken: refreshToken.isEmpty ? nil : refreshToken,
-            scope: self.configuration.scopes.joined(separator: " "),  // Or parse from response?
+            scope: configuration.scopes.joined(separator: " "), // Or parse from response?
             issuedAt: now,
-            clientId: self.configuration.clientId,
-            authorizationEndpoint: self.configuration.authorizationEndpoint,
-            tokenEndpoint: self.configuration.tokenEndpoint
+            clientId: configuration.clientId,
+            authorizationEndpoint: configuration.authorizationEndpoint,
+            tokenEndpoint: configuration.tokenEndpoint
         )
     }
 
     // MARK: - Legacy / Discovery Support (Preserved for compatibility)
+
     // These methods are kept to support the dynamic discovery features of the SDK,
     // though the authentication flow itself now relies on OAuthSwift.
 
@@ -515,7 +523,7 @@ public actor OAuthAuthenticator {
 
     public func validatePKCESupport(in discoveryDocument: OAuthDiscoveryDocument) throws {
         guard let supportedMethods = discoveryDocument.codeChallengeMethodsSupported,
-            !supportedMethods.isEmpty
+              !supportedMethods.isEmpty
         else {
             throw OAuthError.pkceNotSupported(
                 "Authorization server does not advertise PKCE support")
@@ -532,24 +540,23 @@ public actor OAuthAuthenticator {
             let pathString = pathComponents.joined(separator: "/")
             if let url = URL(
                 string:
-                    "\(issuerURL.scheme!)://\(issuerURL.host!)\(issuerURL.port.map { ":\($0)" } ?? "")/.well-known/oauth-authorization-server/\(pathString)"
+                "\(issuerURL.scheme!)://\(issuerURL.host!)\(issuerURL.port.map { ":\($0)" } ?? "")/.well-known/oauth-authorization-server/\(pathString)"
             ) {
                 discoveryURLs.append(url)
             }
             if let url = URL(
                 string:
-                    "\(issuerURL.scheme!)://\(issuerURL.host!)\(issuerURL.port.map { ":\($0)" } ?? "")/.well-known/openid-configuration/\(pathString)"
+                "\(issuerURL.scheme!)://\(issuerURL.host!)\(issuerURL.port.map { ":\($0)" } ?? "")/.well-known/openid-configuration/\(pathString)"
             ) {
                 discoveryURLs.append(url)
             }
-            if let url = URL(string: "\(issuerURL.absoluteString)/.well-known/openid-configuration")
-            {
+            if let url = URL(string: "\(issuerURL.absoluteString)/.well-known/openid-configuration") {
                 discoveryURLs.append(url)
             }
         }
 
         if let domain = issuerURL.host, let scheme = issuerURL.scheme {
-            let portString = issuerURL.port.map({ ":\($0)" }) ?? ""
+            let portString = issuerURL.port.map { ":\($0)" } ?? ""
             if let url = URL(
                 string: "\(scheme)://\(domain)\(portString)/.well-known/oauth-authorization-server")
             {
@@ -615,10 +622,11 @@ public actor OAuthAuthenticator {
     }
 
     // MARK: - PKCE Utilities
+
     private func generateCodeVerifier() -> String {
         // Implement manual generation as OAuthSwift version might not expose it statically
         // Length between 43 and 128 chars
-        let length = 32  // 32 bytes gives ~43 chars base64Url
+        let length = 32 // 32 bytes gives ~43 chars base64Url
         var data = Data(count: length)
         let result = data.withUnsafeMutableBytes {
             SecRandomCopyBytes(kSecRandomDefault, length, $0.baseAddress!)
@@ -649,7 +657,7 @@ extension Data {
     }
 
     func base64URLEncodedString() -> String {
-        return self.base64EncodedString()
+        return base64EncodedString()
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
