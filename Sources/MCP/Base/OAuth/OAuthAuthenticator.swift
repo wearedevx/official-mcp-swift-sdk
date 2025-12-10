@@ -1,5 +1,6 @@
 import Foundation
 import Logging
+import OAuthSwift
 
 #if canImport(CryptoKit)
     import CryptoKit
@@ -20,6 +21,8 @@ public actor OAuthAuthenticator {
     let urlSession: URLSession
     let logger: Logger
 
+    private var oauthSwift: OAuth2Swift
+
     /// Current cached token
     private var currentToken: OAuthToken?
 
@@ -36,6 +39,14 @@ public actor OAuthAuthenticator {
         self.tokenStorage = tokenStorage ?? InMemoryTokenStorage()
         self.urlSession = urlSession
         self.logger = logger ?? Logger(label: "mcp.oauth.authenticator")
+
+        oauthSwift = OAuth2Swift(
+            consumerKey: configuration.clientId,
+            consumerSecret: configuration.clientSecret ?? "",
+            authorizeUrl: configuration.authorizationEndpoint.absoluteString,
+            accessTokenUrl: configuration.tokenEndpoint.absoluteString,
+            responseType: "code"
+        )
     }
 
     // MARK: - PKCE Support
@@ -214,41 +225,38 @@ public actor OAuthAuthenticator {
             throw OAuthError.clientCredentialsNotAllowedForPublicClients
         }
 
-        guard let clientSecret = configuration.clientSecret else {
-            throw OAuthError.clientSecretRequired
-        }
-
         logger.info("Performing client credentials authentication")
+        let token = try await withCheckedThrowingContinuation { continuation in
+            var parameters: OAuthSwift.Parameters = [:]
+            if let additionalParams = configuration.additionalParameters {
+                for (key, value) in additionalParams {
+                    parameters[key] = value
+                }
+            }
 
-        var request = URLRequest(url: configuration.tokenEndpoint)
-        request.httpMethod = "POST"
-        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-
-        var parameters = [
-            "grant_type": "client_credentials",
-            "client_id": configuration.clientId,
-            "client_secret": clientSecret,
-        ]
-
-        if !configuration.scopes.isEmpty {
-            parameters["scope"] = configuration.scopes.joined(separator: " ")
-        }
-
-        // Add resource parameter for MCP (RFC 8707 Resource Indicators)
-        if let resourceIndicator = configuration.resourceIndicator {
-            parameters["resource"] = resourceIndicator
-        }
-
-        // Add additional parameters
-        if let additionalParams = configuration.additionalParameters {
-            for (key, value) in additionalParams {
-                parameters[key] = value
+            oauthSwift.authorize(
+                withCallbackURL: self.configuration.redirectURI,
+                scope: self.configuration.scopes.joined(separator: " "),
+                state: "state",
+                parameters: parameters
+            ) { result in
+                switch result {
+                case let .success((credential, _, _)):
+                    let now = Date.now
+                    let expiresIn = credential.oauthTokenExpiresAt?.timeIntervalSince(now).rounded() ?? 0
+                    let token = OAuthToken(
+                        accessToken: credential.oauthToken,
+                        tokenType: "Bearer",
+                        expiresIn: Int(expiresIn),
+                        refreshToken: credential.oauthRefreshToken,
+                        clientId: credential.consumerKey
+                    )
+                    continuation.resume(returning: token)
+                case let .failure(error):
+                    continuation.resume(throwing: error)
+                }
             }
         }
-
-        request.httpBody = formURLEncode(parameters).data(using: .utf8)
-
-        let token = try await performTokenRequest(request, for: configuration.clientId)
 
         // Store and cache the token
         try await tokenStorage.store(token: token, for: identifier)
@@ -270,43 +278,31 @@ public actor OAuthAuthenticator {
             throw OAuthError.refreshTokenNotAvailable
         }
 
-        let clientId = self.configuration.clientId
-
         logger.info("Refreshing access token", metadata: ["identifier": "\(identifier)", "token-endpoint": "\(configuration.tokenEndpoint.absoluteString)"])
 
         let task = Task<OAuthToken, Swift.Error> {
-            defer { refreshTask = nil }
+            let result: OAuthToken = try await withCheckedThrowingContinuation { continuation in
+                self.oauthSwift.renewAccessToken(withRefreshToken: refreshToken) { result in
+                    switch result {
+                    case let .success((credential, _, _)):
+                        let now = Date.now
+                        let expiresIn = credential.oauthTokenExpiresAt?.timeIntervalSince(now).rounded() ?? 0
+                        let token = OAuthToken(
+                            accessToken: credential.oauthToken,
+                            tokenType: "Bearer",
+                            expiresIn: Int(expiresIn),
+                            refreshToken: credential.oauthRefreshToken,
+                            clientId: credential.consumerKey
+                        )
+                        continuation.resume(returning: token)
 
-            var request = URLRequest(url: configuration.tokenEndpoint)
-            request.httpMethod = "POST"
-            request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-
-            var parameters = [
-                "grant_type": "refresh_token",
-                "refresh_token": refreshToken,
-                "client_id": clientId,
-            ]
-
-            // Add client secret for confidential clients
-            if configuration.clientType == .confidential, let clientSecret = configuration.clientSecret {
-                parameters["client_secret"] = clientSecret
+                    case let .failure(error):
+                        continuation.resume(throwing: error)
+                    }
+                }
             }
 
-            // Add resource parameter for MCP token refresh (RFC 8707 Resource Indicators)
-            if let resourceIndicator = configuration.resourceIndicator {
-                parameters["resource"] = resourceIndicator
-            }
-
-            request.httpBody = formURLEncode(parameters).data(using: .utf8)
-
-            let newToken = try await performTokenRequest(request, for: configuration.clientId)
-
-            // Store and cache the new token
-            try await tokenStorage.store(token: newToken, for: identifier)
-            currentToken = newToken
-
-            logger.info("Token refresh successful")
-            return newToken
+            return result
         }
 
         refreshTask = task
@@ -623,6 +619,14 @@ public actor OAuthAuthenticator {
             redirectURIs: redirectURIs,
             scopes: scopes,
             tokenEndpointAuthMethod: isPublicClient ? "none" : "client_secret_post"
+        )
+
+        oauthSwift = OAuth2Swift(
+            consumerKey: registration.clientId,
+            consumerSecret: registration.clientSecret ?? "",
+            authorizeUrl: discovery.authorizationEndpoint.absoluteString,
+            accessTokenUrl: discovery.tokenEndpoint.absoluteString,
+            responseType: "code"
         )
 
         // 3. Create configuration from registration

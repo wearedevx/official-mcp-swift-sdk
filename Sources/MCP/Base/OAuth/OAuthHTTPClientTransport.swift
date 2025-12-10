@@ -499,10 +499,11 @@ public actor OAuthHTTPClientTransport: Transport {
         authenticator = newAuthenticator
 
         do {
-            let token = try await authenticator.getValidToken(for: tokenIdentifier)
-            let newToken = try await authenticator.refreshToken(token, identifier: tokenIdentifier)
+            // Perform client credentials authentication
+            let token = try await authenticator.authenticateWithClientCredentials(identifier: tokenIdentifier)
 
-            updateBaseTransport(with: newToken)
+            // Update transport and reconnect
+            try await updateTransportWithToken(token)
             logger.info("OAuth HTTP transport connected with existing token")
             return
         } catch {

@@ -24,6 +24,7 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-system.git", from: "1.0.0"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.5.0"),
         .package(url: "https://github.com/mattt/eventsource.git", from: "1.1.0"),
+        .package(url: "https://github.com/OAuthSwift/OAuthSwift.git", from: "2.2.0"),
     ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
@@ -37,6 +38,7 @@ let package = Package(
                     name: "EventSource", package: "eventsource",
                     condition: .when(platforms: [.macOS, .iOS, .tvOS, .visionOS, .watchOS, .macCatalyst])
                 ),
+                .product(name: "OAuthSwift", package: "OAuthSwift"),
             ]
         ),
         .testTarget(
