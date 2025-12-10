@@ -140,9 +140,9 @@ public enum PKCECodeChallengeMethod: String, Sendable, CaseIterable {
 
 // MARK: - OAuth 2.1 Provider Presets
 
-public extension OAuthConfiguration {
+extension OAuthConfiguration {
     /// GitHub OAuth 2.1 configuration with PKCE support
-    static func github(
+    public static func github(
         clientId: String,
         clientSecret: String? = nil,
         scopes: [String] = ["read:user"],
@@ -152,10 +152,12 @@ public extension OAuthConfiguration {
         let clientType: OAuthClientType = clientSecret != nil ? .confidential : .public
 
         guard let authEndpoint = URL(string: "https://github.com/login/oauth/authorize"),
-              let tokenEndpoint = URL(string: "https://github.com/login/oauth/access_token"),
-              let revocationEndpoint = URL(string: "https://github.com/settings/connections/applications/\(clientId)")
+            let tokenEndpoint = URL(string: "https://github.com/login/oauth/access_token"),
+            let revocationEndpoint = URL(
+                string: "https://github.com/settings/connections/applications/\(clientId)")
         else {
-            throw OAuthError.invalidConfiguration("Invalid GitHub OAuth endpoints")
+            throw OAuthAuthenticator.OAuthError.invalidConfiguration(
+                "Invalid GitHub OAuth endpoints")
         }
 
         return try OAuthConfiguration(
@@ -172,7 +174,7 @@ public extension OAuthConfiguration {
     }
 
     /// Google OAuth 2.1 configuration with PKCE support
-    static func google(
+    public static func google(
         clientId: String,
         clientSecret: String? = nil,
         scopes: [String] = ["openid", "profile", "email"],
@@ -182,10 +184,11 @@ public extension OAuthConfiguration {
         let clientType: OAuthClientType = clientSecret != nil ? .confidential : .public
 
         guard let authEndpoint = URL(string: "https://accounts.google.com/o/oauth2/v2/auth"),
-              let tokenEndpoint = URL(string: "https://oauth2.googleapis.com/token"),
-              let revocationEndpoint = URL(string: "https://oauth2.googleapis.com/revoke")
+            let tokenEndpoint = URL(string: "https://oauth2.googleapis.com/token"),
+            let revocationEndpoint = URL(string: "https://oauth2.googleapis.com/revoke")
         else {
-            throw OAuthError.invalidConfiguration("Invalid Google OAuth endpoints")
+            throw OAuthAuthenticator.OAuthError.invalidConfiguration(
+                "Invalid Google OAuth endpoints")
         }
 
         return try OAuthConfiguration(
@@ -202,7 +205,7 @@ public extension OAuthConfiguration {
     }
 
     /// Microsoft OAuth 2.1 configuration with PKCE support
-    static func microsoft(
+    public static func microsoft(
         clientId: String,
         clientSecret: String? = nil,
         tenantId: String = "common",
@@ -212,11 +215,16 @@ public extension OAuthConfiguration {
     ) throws -> OAuthConfiguration {
         let clientType: OAuthClientType = clientSecret != nil ? .confidential : .public
 
-        guard let authEndpoint = URL(string: "https://login.microsoftonline.com/\(tenantId)/oauth2/v2.0/authorize"),
-              let tokenEndpoint = URL(string: "https://login.microsoftonline.com/\(tenantId)/oauth2/v2.0/token"),
-              let revocationEndpoint = URL(string: "https://login.microsoftonline.com/\(tenantId)/oauth2/v2.0/logout")
+        guard
+            let authEndpoint = URL(
+                string: "https://login.microsoftonline.com/\(tenantId)/oauth2/v2.0/authorize"),
+            let tokenEndpoint = URL(
+                string: "https://login.microsoftonline.com/\(tenantId)/oauth2/v2.0/token"),
+            let revocationEndpoint = URL(
+                string: "https://login.microsoftonline.com/\(tenantId)/oauth2/v2.0/logout")
         else {
-            throw OAuthError.invalidConfiguration("Invalid Microsoft OAuth endpoints for tenant: \(tenantId)")
+            throw OAuthAuthenticator.OAuthError.invalidConfiguration(
+                "Invalid Microsoft OAuth endpoints for tenant: \(tenantId)")
         }
 
         return try OAuthConfiguration(
@@ -233,7 +241,7 @@ public extension OAuthConfiguration {
     }
 
     /// Generic OAuth 2.1 public client configuration with mandatory PKCE for MCP
-    static func publicClient(
+    public static func publicClient(
         authorizationEndpoint: URL,
         tokenEndpoint: URL,
         revocationEndpoint: URL? = nil,
@@ -253,14 +261,14 @@ public extension OAuthConfiguration {
             scopes: scopes,
             redirectURI: redirectURI,
             additionalParameters: additionalParameters,
-            usePKCE: true, // OAuth 2.1 mandatory for public clients
-            pkceCodeChallengeMethod: .S256, // Will fallback to .plain if crypto unavailable
+            usePKCE: true,  // OAuth 2.1 mandatory for public clients
+            pkceCodeChallengeMethod: .S256,  // Will fallback to .plain if crypto unavailable
             resourceIndicator: resourceIndicator
         )
     }
 
     /// Generic OAuth 2.1 confidential client configuration for MCP
-    static func confidentialClient(
+    public static func confidentialClient(
         authorizationEndpoint: URL,
         tokenEndpoint: URL,
         revocationEndpoint: URL? = nil,
@@ -289,28 +297,27 @@ public extension OAuthConfiguration {
     }
 
     /// Create OAuth configuration from dynamic client registration response
-    static func fromDynamicRegistration(
+    public static func fromDynamicRegistration(
         authorizationEndpoint: URL,
         tokenEndpoint: URL,
         revocationEndpoint: URL? = nil,
-        registrationResponse: ClientRegistrationResponse,
+        registrationResponse: OAuthAuthenticator.ClientRegistrationResponse,
         scopes: [String] = []
     ) throws -> OAuthConfiguration {
-        guard let firstRedirectURI = registrationResponse.redirectUris.first,
-              let redirectURI = URL(string: firstRedirectURI)
+        // ClientRegistrationResponse has 'redirect_uris' which returns the list of registered URIs.
+        guard let firstRedirectURI = registrationResponse.redirectUris?.first,
+            let redirectURI = URL(string: firstRedirectURI)
         else {
             throw OAuthConfigurationError.invalidRedirectURI
         }
 
-        // Let the OAuthConfiguration initializer automatically determine clientType and usePKCE
-        // based on the presence of clientSecret (OAuth 2.1 automatic client type detection)
         return try OAuthConfiguration(
             authorizationEndpoint: authorizationEndpoint,
             tokenEndpoint: tokenEndpoint,
             revocationEndpoint: revocationEndpoint,
             clientId: registrationResponse.clientId,
             clientSecret: registrationResponse.clientSecret,
-            scopes: scopes.isEmpty ? (registrationResponse.scopes?.split(separator: " ").map(String.init) ?? []) : scopes,
+            scopes: scopes,
             redirectURI: redirectURI
         )
     }
