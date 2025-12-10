@@ -23,6 +23,12 @@ public struct OAuthToken: Codable, Sendable {
     /// The client ID associated with this token
     public let clientId: String?
 
+    /// The authorization endpoint URL associated with this token
+    public let authorizationEndpoint: URL?
+
+    /// The token endpoint URL associated with this token
+    public let tokenEndpoint: URL?
+
     /// Checks if the token is expired (with 60 second buffer)
     public var isExpired: Bool {
         guard let expiresIn = expiresIn else { return false }
@@ -36,7 +42,9 @@ public struct OAuthToken: Codable, Sendable {
         refreshToken: String? = nil,
         scope: String? = nil,
         issuedAt: Date = Date(),
-        clientId: String? = nil
+        clientId: String? = nil,
+        authorizationEndpoint: URL? = nil,
+        tokenEndpoint: URL? = nil
     ) {
         self.accessToken = accessToken
         self.tokenType = tokenType
@@ -45,6 +53,7 @@ public struct OAuthToken: Codable, Sendable {
         self.scope = scope
         self.issuedAt = issuedAt
         self.clientId = clientId
+        self.authorizationEndpoint = authorizationEndpoint
+        self.tokenEndpoint = tokenEndpoint
     }
 }
-

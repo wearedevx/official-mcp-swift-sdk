@@ -11,13 +11,13 @@ import Logging
 
 /// Actor responsible for OAuth authentication and token management
 public actor OAuthAuthenticator {
-    public let configuration: OAuthConfiguration
+    public var configuration: OAuthConfiguration
     public let tokenStorage: TokenStorage
     public let logger: Logger
     public let urlSession: URLSession
 
     // The underlying OAuthSwift configuration
-    private let oauthSwift: OAuth2Swift
+    private var oauthSwift: OAuth2Swift
 
     /// Current cached token
     private var currentToken: OAuthToken?
@@ -275,6 +275,56 @@ public actor OAuthAuthenticator {
 
         // Try to load token from storage
         if let storedToken = try await tokenStorage.retrieve(for: identifier) {
+
+            // Check if stored token has valid configuration URLs that improve upon our current config
+            // (e.g. if we are using dummy URLs from initialization)
+            let hasBetterConfig =
+                (storedToken.authorizationEndpoint != nil && storedToken.tokenEndpoint != nil)
+
+            if hasBetterConfig {
+                let storedAuthEndpoint = storedToken.authorizationEndpoint!
+                let storedTokenEndpoint = storedToken.tokenEndpoint!
+
+                // If endpoints differ, update our configuration
+                if storedAuthEndpoint != configuration.authorizationEndpoint
+                    || storedTokenEndpoint != configuration.tokenEndpoint
+                {
+
+                    logger.info("Restoring OAuth configuration from stored token")
+
+                    do {
+                        // Create updated configuration
+                        let newConfig = try OAuthConfiguration(
+                            authorizationEndpoint: storedAuthEndpoint,
+                            tokenEndpoint: storedTokenEndpoint,
+                            revocationEndpoint: configuration.revocationEndpoint,
+                            clientId: configuration.clientId,
+                            clientSecret: configuration.clientSecret,
+                            clientType: configuration.clientType,
+                            scopes: configuration.scopes,
+                            redirectURI: configuration.redirectURI,
+                            additionalParameters: configuration.additionalParameters,
+                            usePKCE: configuration.usePKCE,
+                            pkceCodeChallengeMethod: configuration.pkceCodeChallengeMethod,
+                            resourceIndicator: configuration.resourceIndicator
+                        )
+
+                        self.configuration = newConfig
+
+                        // Re-initialize OAuthSwift with the new endpoints
+                        self.oauthSwift = OAuth2Swift(
+                            consumerKey: newConfig.clientId,
+                            consumerSecret: newConfig.clientSecret ?? "",
+                            authorizeUrl: newConfig.authorizationEndpoint.absoluteString,
+                            accessTokenUrl: newConfig.tokenEndpoint.absoluteString,
+                            responseType: "code"
+                        )
+                    } catch {
+                        logger.warning("Failed to restore configuration from token: \(error)")
+                    }
+                }
+            }
+
             // Check expiry with a small buffer (e.g. 10 seconds)
             if !storedToken.isExpired {
                 currentToken = storedToken
@@ -426,7 +476,9 @@ public actor OAuthAuthenticator {
             refreshToken: refreshToken.isEmpty ? nil : refreshToken,
             scope: self.configuration.scopes.joined(separator: " "),  // Or parse from response?
             issuedAt: now,
-            clientId: self.configuration.clientId
+            clientId: self.configuration.clientId,
+            authorizationEndpoint: self.configuration.authorizationEndpoint,
+            tokenEndpoint: self.configuration.tokenEndpoint
         )
     }
 

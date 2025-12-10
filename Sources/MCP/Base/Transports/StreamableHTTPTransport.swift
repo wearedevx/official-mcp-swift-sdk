@@ -1,6 +1,5 @@
-import Logging
-
 import Foundation
+import Logging
 
 public actor StreamableHTTPTransport: Transport {
     public var logger: Logging.Logger =
@@ -21,7 +20,7 @@ public actor StreamableHTTPTransport: Transport {
     private var eventListeningError: MCPError?
     private var streamingTask: Task<Void, Never>?
 
-    private let requestModifier: (@Sendable (URLRequest) async -> URLRequest)?
+    private let requestModifier: (@Sendable (URLRequest) async throws -> URLRequest)?
 
     private var messageStream: AsyncThrowingStream<Data, Swift.Error>
     private var messageContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
@@ -29,7 +28,7 @@ public actor StreamableHTTPTransport: Transport {
     public init(
         endpoint: URL,
         session: URLSession,
-        requestModifier: (@Sendable (URLRequest) async -> URLRequest)? = nil,
+        requestModifier: (@Sendable (URLRequest) async throws -> URLRequest)? = nil,
         logger: Logger? = nil
     ) {
         self.endpoint = endpoint
@@ -69,8 +68,8 @@ public actor StreamableHTTPTransport: Transport {
         streamingTask = Task.detached { await self.startListeningForServerEvents() }
 
         // wait for the connection to happen with a valid endpoint
-        let timeoutNs = 45_000_000_000 // 45 seconds
-        let sleepIntervalNs: UInt64 = 50_000_000 // 50 ms
+        let timeoutNs = 45_000_000_000  // 45 seconds
+        let sleepIntervalNs: UInt64 = 50_000_000  // 50 ms
         var elapsedNs: UInt64 = 0
 
         while isListeningForServerEvents == false, eventListeningError == nil {
@@ -115,15 +114,15 @@ public actor StreamableHTTPTransport: Transport {
         }
 
         if let requestModifier {
-            request = await requestModifier(request)
+            request = try await requestModifier(request)
         }
 
         let repr = """
-        \(request.httpMethod ?? "") \(request.url?.absoluteString ?? "<no url>")
-        \(request.allHTTPHeaderFields?.map { "\($0.0): \($0.1)" }.joined(separator: "\n") ?? "")
-        
-        \(String(data: data, encoding: .utf8) ?? "<no-data>")
-        """
+            \(request.httpMethod ?? "") \(request.url?.absoluteString ?? "<no url>")
+            \(request.allHTTPHeaderFields?.map { "\($0.0): \($0.1)" }.joined(separator: "\n") ?? "")
+
+            \(String(data: data, encoding: .utf8) ?? "<no-data>")
+            """
 
         logger.info("SENDING: \(repr)")
 
@@ -133,10 +132,11 @@ public actor StreamableHTTPTransport: Transport {
             throw MCPError.internalError("Invalid HTTP response")
         }
 
-        logger.info("""
-        RECEIVED HEADERS: \(httpResponse.statusCode)
-        \(httpResponse.allHeaderFields.map { "\($0.0): \($0.1)" }.joined(separator: "\n"))
-        """)
+        logger.info(
+            """
+            RECEIVED HEADERS: \(httpResponse.statusCode)
+            \(httpResponse.allHeaderFields.map { "\($0.0): \($0.1)" }.joined(separator: "\n"))
+            """)
 
         // Process the response based on content type and status code
         let contentType = httpResponse.value(forHTTPHeaderField: "Content-Type") ?? ""
@@ -171,7 +171,8 @@ public actor StreamableHTTPTransport: Transport {
 
                 let continuation = messageContinuation
                 try await decodeSSEStream(stream) { message in
-                    await self.logger.info("Received SSE message \(String(data: message, encoding: .utf8) ?? "<nil>")")
+                    await self.logger.info(
+                        "Received SSE message \(String(data: message, encoding: .utf8) ?? "<nil>")")
                     continuation.yield(message)
                 }
                 return
@@ -184,7 +185,8 @@ public actor StreamableHTTPTransport: Transport {
                     data.append(byte)
                 }
 
-                logger.info("Received JSON response \(String(data: data, encoding: .utf8) ?? "<nil>")")
+                logger.info(
+                    "Received JSON response \(String(data: data, encoding: .utf8) ?? "<nil>")")
                 messageContinuation.yield(data)
             }
 
@@ -260,7 +262,7 @@ public actor StreamableHTTPTransport: Transport {
                                     if let endpointCommunication {
                                         if let newEndpoint = URL(
                                             string:
-                                            "\(endpointCommunication.absoluteString)\(eventData)"
+                                                "\(endpointCommunication.absoluteString)\(eventData)"
                                         ) {
                                             endpoint = newEndpoint
                                             logger.info(
@@ -271,7 +273,8 @@ public actor StreamableHTTPTransport: Transport {
                                                 "Failed to construct new endpoint URL from SSE data: \(eventData)"
                                             )
                                         }
-                                    } else if let scheme = endpoint.scheme, let host = endpoint.host {
+                                    } else if let scheme = endpoint.scheme, let host = endpoint.host
+                                    {
                                         // Construct the new endpoint URL using the original scheme and host
                                         let portString = endpoint.port.map { ":\($0)" } ?? ""
                                         if let newEndpoint = URL(
@@ -299,7 +302,7 @@ public actor StreamableHTTPTransport: Transport {
                                             metadata: [
                                                 "type":
                                                     "\(eventType.isEmpty ? "message" : eventType)",
-                                                "id": "\(eventID ?? "none")"
+                                                "id": "\(eventID ?? "none")",
                                             ]
                                         )
                                         await handleMessage(data)
@@ -338,7 +341,7 @@ public actor StreamableHTTPTransport: Transport {
                                 eventData.append(value)
 
                             case "id":
-                                if !value.contains("\0") { // ID must not contain NULL
+                                if !value.contains("\0") {  // ID must not contain NULL
                                     eventID = value
                                     lastEventID = value
                                 }
@@ -381,16 +384,17 @@ public actor StreamableHTTPTransport: Transport {
         }
 
         if let requestModifier {
-            request = await requestModifier(request)
+            request = try await requestModifier(request)
         }
 
         logger.info("Starting SSE connection")
 
-        logger.info("""
-        SENDING:
-        \(request.httpMethod ?? "") \(request.url?.absoluteString ?? "<no url>")
-        \(request.allHTTPHeaderFields?.map { "\($0.0): \($0.1)" }.joined(separator: "\n") ?? "")
-        """)
+        logger.info(
+            """
+            SENDING:
+            \(request.httpMethod ?? "") \(request.url?.absoluteString ?? "<no url>")
+            \(request.allHTTPHeaderFields?.map { "\($0.0): \($0.1)" }.joined(separator: "\n") ?? "")
+            """)
 
         // Create URLSession task for SSE
         let (stream, response) = try await listenerSession.bytes(for: request)
@@ -399,10 +403,11 @@ public actor StreamableHTTPTransport: Transport {
             throw MCPError.internalError("Invalid HTTP response")
         }
 
-        logger.info("""
-        RECEIVED HEADERS: \(httpResponse.statusCode)
-        \(httpResponse.allHeaderFields.map { "\($0.0): \($0.1)" }.joined(separator: "\n"))
-        """)
+        logger.info(
+            """
+            RECEIVED HEADERS: \(httpResponse.statusCode)
+            \(httpResponse.allHeaderFields.map { "\($0.0): \($0.1)" }.joined(separator: "\n"))
+            """)
 
         // Extract session ID if present
         if let newSessionID = httpResponse.value(forHTTPHeaderField: "Mcp-Session-Id") {
@@ -476,7 +481,7 @@ public actor StreamableHTTPTransport: Transport {
                 if !Task.isCancelled {
                     logger.error("SSE connection error: \(error)")
                     // Wait before retrying
-                    try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)  // 1 second
                 }
             }
         }

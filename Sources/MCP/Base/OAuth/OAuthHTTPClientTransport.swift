@@ -302,13 +302,7 @@ public actor OAuthHTTPClientTransport: Transport {
 
             logger.info("OAuth HTTP transport ready, awaiting OAuth discovery")
         } catch {
-            // For confidential clients, try client credentials flow
-            // NOTE: Confidential client flow is currently disabled in favor of Public/PKCE
-            logger.info("Attempting authentication")
-            let token = try await authenticator.authenticate(identifier: tokenIdentifier)
-            updateBaseTransport(with: token)
-            try await baseTransport.connect()
-            logger.info("OAuth HTTP transport connected")
+            logger.error("Connection error: \(error)")
         }
     }
 
@@ -544,7 +538,7 @@ public actor OAuthHTTPClientTransport: Transport {
         logger.info("Public client detected - authorization code flow with PKCE required")
 
         // Create a new configuration with the discovered endpoints and resource indicator
-        let currentConfig = authenticator.configuration
+        let currentConfig = await authenticator.configuration
         let mcpConfig = try createMCPConfiguration(
             from: discoveryDocument,
             basedOn: currentConfig,
