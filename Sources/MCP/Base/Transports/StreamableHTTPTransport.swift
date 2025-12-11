@@ -93,7 +93,9 @@ public actor StreamableHTTPTransport: Transport {
         isConnected = false
 
         streamingTask?.cancel()
+        await streamingTask?.value
         streamingTask = nil
+
         session.finishTasksAndInvalidate()
         listenerSession.finishTasksAndInvalidate()
 
@@ -369,6 +371,7 @@ public actor StreamableHTTPTransport: Transport {
 
         logger.info("Starting SSE connection")
 
+        guard isConnected else { return }
         // Create URLSession task for SSE
         let (stream, response) = try await listenerSession.bytes(for: request)
 

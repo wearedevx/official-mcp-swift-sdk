@@ -164,20 +164,22 @@ public actor OAuthHTTPClientTransport: Transport {
             storage = tokenStorage ?? InMemoryTokenStorage()
         #endif
 
-        // Create URLSession for the authenticator
-        let session = URLSession(configuration: configuration)
+        // Create separate URLSession instances for authenticator and transport
+        // to avoid session invalidation race conditions
+        let authenticatorSession = URLSession(configuration: configuration)
+        let transportSession = URLSession(configuration: configuration)
 
         authenticator = OAuthAuthenticator(
             configuration: oauthConfig,
             tokenStorage: storage,
-            urlSession: session,
+            urlSession: authenticatorSession,
             logger: effectiveLogger
         )
 
         if streamableHTTP {
             baseTransport = StreamableHTTPTransport(
                 endpoint: endpoint,
-                session: session,
+                session: transportSession,
                 requestModifier: { [authenticator, tokenIdentifier] req async -> URLRequest in
                     var request = req
                     // Use getValidToken to ensure we always have a fresh token (refreshing if needed)
@@ -194,7 +196,7 @@ public actor OAuthHTTPClientTransport: Transport {
         } else {
             baseTransport = HTTPClientTransport(
                 endpoint: endpoint,
-                session: session,
+                session: transportSession,
                 streaming: true,
                 requestModifier: { [authenticator, tokenIdentifier] req async -> URLRequest in
                     var request = req
@@ -289,6 +291,9 @@ public actor OAuthHTTPClientTransport: Transport {
             return
         } catch OAuthAuthenticator.OAuthError.authenticationRequired {
             logger.info("No valid token found, will attempt MCP OAuth discovery on first request")
+
+            // Disconnect the old transport before replacing it
+            await baseTransport.disconnect()
 
             // For MCP, we'll discover OAuth requirements when we get a 401 response
             // Create an unauthenticated transport for the initial discovery request

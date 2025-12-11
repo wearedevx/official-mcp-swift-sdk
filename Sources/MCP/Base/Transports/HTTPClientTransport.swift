@@ -99,6 +99,7 @@ public actor HTTPClientTransport: Actor, Transport {
 
         // Cancel streaming task if active
         streamingTask?.cancel()
+        await streamingTask?.value
         streamingTask = nil
 
         // Finish outstanding tasks and invalidate the session
@@ -261,6 +262,7 @@ public actor HTTPClientTransport: Actor, Transport {
 
             logger.debug("Starting SSE connection")
 
+            guard isConnected else { return }
             // Create URLSession task for SSE
             let (stream, response) = try await session.bytes(for: request)
 
