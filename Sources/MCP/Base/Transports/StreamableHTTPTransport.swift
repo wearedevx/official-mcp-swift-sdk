@@ -68,8 +68,8 @@ public actor StreamableHTTPTransport: Transport {
         streamingTask = Task.detached { await self.startListeningForServerEvents() }
 
         // wait for the connection to happen with a valid endpoint
-        let timeoutNs = 45_000_000_000  // 45 seconds
-        let sleepIntervalNs: UInt64 = 50_000_000  // 50 ms
+        let timeoutNs = 45_000_000_000 // 45 seconds
+        let sleepIntervalNs: UInt64 = 50_000_000 // 50 ms
         var elapsedNs: UInt64 = 0
 
         while isListeningForServerEvents == false, eventListeningError == nil {
@@ -117,26 +117,11 @@ public actor StreamableHTTPTransport: Transport {
             request = try await requestModifier(request)
         }
 
-        let repr = """
-            \(request.httpMethod ?? "") \(request.url?.absoluteString ?? "<no url>")
-            \(request.allHTTPHeaderFields?.map { "\($0.0): \($0.1)" }.joined(separator: "\n") ?? "")
-
-            \(String(data: data, encoding: .utf8) ?? "<no-data>")
-            """
-
-        logger.info("SENDING: \(repr)")
-
         let (stream, response) = try await session.bytes(for: request)
 
         guard let httpResponse = response as? HTTPURLResponse else {
             throw MCPError.internalError("Invalid HTTP response")
         }
-
-        logger.info(
-            """
-            RECEIVED HEADERS: \(httpResponse.statusCode)
-            \(httpResponse.allHeaderFields.map { "\($0.0): \($0.1)" }.joined(separator: "\n"))
-            """)
 
         // Process the response based on content type and status code
         let contentType = httpResponse.value(forHTTPHeaderField: "Content-Type") ?? ""
@@ -144,7 +129,7 @@ public actor StreamableHTTPTransport: Transport {
         // Extract session ID if present
         if let newSessionID = httpResponse.value(forHTTPHeaderField: "Mcp-Session-Id") {
             sessionID = newSessionID
-            logger.info("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
+            logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
         }
 
         func consumeBody(_ stream: URLSession.AsyncBytes) async -> String {
@@ -171,8 +156,6 @@ public actor StreamableHTTPTransport: Transport {
 
                 let continuation = messageContinuation
                 try await decodeSSEStream(stream) { message in
-                    await self.logger.info(
-                        "Received SSE message \(String(data: message, encoding: .utf8) ?? "<nil>")")
                     continuation.yield(message)
                 }
                 return
@@ -185,8 +168,6 @@ public actor StreamableHTTPTransport: Transport {
                     data.append(byte)
                 }
 
-                logger.info(
-                    "Received JSON response \(String(data: data, encoding: .utf8) ?? "<nil>")")
                 messageContinuation.yield(data)
             }
 
@@ -262,7 +243,7 @@ public actor StreamableHTTPTransport: Transport {
                                     if let endpointCommunication {
                                         if let newEndpoint = URL(
                                             string:
-                                                "\(endpointCommunication.absoluteString)\(eventData)"
+                                            "\(endpointCommunication.absoluteString)\(eventData)"
                                         ) {
                                             endpoint = newEndpoint
                                             logger.info(
@@ -273,8 +254,7 @@ public actor StreamableHTTPTransport: Transport {
                                                 "Failed to construct new endpoint URL from SSE data: \(eventData)"
                                             )
                                         }
-                                    } else if let scheme = endpoint.scheme, let host = endpoint.host
-                                    {
+                                    } else if let scheme = endpoint.scheme, let host = endpoint.host {
                                         // Construct the new endpoint URL using the original scheme and host
                                         let portString = endpoint.port.map { ":\($0)" } ?? ""
                                         if let newEndpoint = URL(
@@ -341,7 +321,7 @@ public actor StreamableHTTPTransport: Transport {
                                 eventData.append(value)
 
                             case "id":
-                                if !value.contains("\0") {  // ID must not contain NULL
+                                if !value.contains("\0") { // ID must not contain NULL
                                     eventID = value
                                     lastEventID = value
                                 }
@@ -389,25 +369,12 @@ public actor StreamableHTTPTransport: Transport {
 
         logger.info("Starting SSE connection")
 
-        logger.info(
-            """
-            SENDING:
-            \(request.httpMethod ?? "") \(request.url?.absoluteString ?? "<no url>")
-            \(request.allHTTPHeaderFields?.map { "\($0.0): \($0.1)" }.joined(separator: "\n") ?? "")
-            """)
-
         // Create URLSession task for SSE
         let (stream, response) = try await listenerSession.bytes(for: request)
 
         guard let httpResponse = response as? HTTPURLResponse else {
             throw MCPError.internalError("Invalid HTTP response")
         }
-
-        logger.info(
-            """
-            RECEIVED HEADERS: \(httpResponse.statusCode)
-            \(httpResponse.allHeaderFields.map { "\($0.0): \($0.1)" }.joined(separator: "\n"))
-            """)
 
         // Extract session ID if present
         if let newSessionID = httpResponse.value(forHTTPHeaderField: "Mcp-Session-Id") {
@@ -481,7 +448,7 @@ public actor StreamableHTTPTransport: Transport {
                 if !Task.isCancelled {
                     logger.error("SSE connection error: \(error)")
                     // Wait before retrying
-                    try? await Task.sleep(nanoseconds: 1_000_000_000)  // 1 second
+                    try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
                 }
             }
         }
