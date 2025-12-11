@@ -617,7 +617,17 @@ public actor OAuthAuthenticator {
         }
 
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        let (data, _) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await URLSession.shared.data(for: request)
+
+        if let httpResponse = response as? HTTPURLResponse {
+            let statusCode = httpResponse.statusCode
+
+            if statusCode >= 400 {
+                let stringBody = String(data: data, encoding: .utf8) ?? ""
+                logger.error("Client registration failed: \(statusCode), \(stringBody)")
+                throw MCPError.internalError("Registration failed: \(statusCode), \(stringBody)")
+            }
+        }
         return try JSONDecoder().decode(ClientRegistrationResponse.self, from: data)
     }
 
