@@ -68,7 +68,7 @@ public actor StreamableHTTPTransport: Transport {
         streamingTask = Task.detached { await self.startListeningForServerEvents() }
 
         // wait for the connection to happen with a valid endpoint
-        let timeoutNs = 45_000_000_000 // 45 seconds
+        let timeoutNs = 90_000_000_000 // 90 seconds (increased for OAuth discovery)
         let sleepIntervalNs: UInt64 = 50_000_000 // 50 ms
         var elapsedNs: UInt64 = 0
 

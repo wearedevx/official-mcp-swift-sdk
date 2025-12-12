@@ -397,16 +397,19 @@ public actor OAuthHTTPClientTransport: Transport {
     /// Perform MCP OAuth discovery and authentication flow
     private func performMCPOAuthDiscovery(wwwAuthenticateHeader: String? = nil) async throws {
         logger.info("Starting MCP OAuth discovery process")
+        logger.info("Step 1/4: Discovering OAuth server metadata...")
 
         let (_, discoveryDocument) = try await discoverOAuthServerMetadata(
             wwwAuthenticateHeader: wwwAuthenticateHeader)
+
+        logger.info("Step 1/4: OAuth server metadata discovered successfully")
 
         // Check if dynamic client registration is available and needed
         if let registrationEndpoint = discoveryDocument.registrationEndpoint,
             let redirectURI = self.redirectURI,
             let clientName = self.clientName
         {
-            logger.info("Registration endpoint found, performing automatic client registration")
+            logger.info("Step 2/4: Registration endpoint found, performing automatic client registration...")
 
             // Register the client
             let registration = try await authenticator.registerClient(
@@ -417,7 +420,7 @@ public actor OAuthHTTPClientTransport: Transport {
             )
 
             logger.info(
-                "Client registered successfully", metadata: ["clientId": "\(registration.clientId)"]
+                "Step 2/4: Client registered successfully", metadata: ["clientId": "\(registration.clientId)"]
             )
 
             // Create new configuration with registered client details
@@ -540,7 +543,7 @@ public actor OAuthHTTPClientTransport: Transport {
     private func handlePublicClientFlow(
         discoveryDocument: OAuthAuthenticator.OAuthDiscoveryDocument
     ) async throws {
-        logger.info("Public client detected - authorization code flow with PKCE required")
+        logger.info("Step 3/4: Public client detected - authorization code flow with PKCE required")
 
         // Create a new configuration with the discovered endpoints and resource indicator
         let currentConfig = await authenticator.configuration
@@ -555,8 +558,9 @@ public actor OAuthHTTPClientTransport: Transport {
         authenticator = try await createAuthenticator(with: mcpConfig)
 
         // Trigger interactive authentication
-        logger.info("Starting interactive authentication")
+        logger.info("Step 4/4: Starting interactive authentication (opening browser)...")
         let token = try await authenticator.authenticate(identifier: tokenIdentifier)
+        logger.info("Step 4/4: Interactive authentication completed successfully")
 
         // Update transport and reconnect
         try await updateTransportWithToken(token)
