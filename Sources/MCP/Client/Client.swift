@@ -313,20 +313,41 @@ public actor Client {
 
     /// Send a request and receive its response
     public func send<M: Method>(_ request: Request<M>) async throws -> M.Result {
-        guard let connection else {
-            throw MCPError.internalError("Client connection not initialized")
-        }
-
         // Use the actor's encoder
         let requestData = try encoder.encode(request)
 
+        return try await send(data: requestData, requestId: request.id)
+    }
+
+    public func send<N: Notification>(_ message: Message<N>) async throws {
+        guard let connection else {
+            throw MCPError.internalError("Client connection not initialized")
+        }
+        // Use the actor's encoder
+        let requestData = try encoder.encode(message)
+
+        Task {
+            // Send the request data
+            do {
+                // Use the existing connection send
+                try await connection.send(requestData)
+            } catch {
+                print("error")
+            }
+        }
+    }
+
+    private func send<R: Decodable & Sendable>(data requestData: Data, requestId: ID) async throws -> R {
+        guard let connection else {
+            throw MCPError.internalError("Client connection not initialized")
+        }
         // Store the pending request first
         return try await withCheckedThrowingContinuation { continuation in
             Task {
                 self.addPendingRequest(
-                    id: request.id,
+                    id: requestId,
                     continuation: continuation,
-                    type: M.Result.self
+                    type: R.self
                 )
 
                 // Send the request data
@@ -336,11 +357,11 @@ public actor Client {
                 } catch {
                     // We need to check if the pending request is still present
                     // because it might have been used anyway
-                    if self.hasPendingRequest(id: request.id),
-                       let pendingRequest = self.pendingRequests[request.id]
+                    if self.hasPendingRequest(id: requestId),
+                       let pendingRequest = self.pendingRequests[requestId]
                     {
                         // If send fails immediately, remove pending request first, then resume to avoid double-resume races
-                        self.removePendingRequest(id: request.id)
+                        self.removePendingRequest(id: requestId)
                         pendingRequest.resume(throwing: error)
                     }
                 }
@@ -527,6 +548,12 @@ public actor Client {
         serverCapabilities = result.capabilities
         serverVersion = result.protocolVersion
         instructions = result.instructions
+
+        let notification = InitializedNotification.message()
+
+        Task {
+            _ = try await send(notification)
+        }
 
         return result
     }
