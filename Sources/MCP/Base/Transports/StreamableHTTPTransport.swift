@@ -82,7 +82,8 @@ public actor StreamableHTTPTransport: Transport {
 
         if let eventListeningError {
             logger.warning(
-                "HTTP transport failed to connect: \(eventListeningError.localizedDescription)")
+                "HTTP transport failed to connect: \(eventListeningError.localizedDescription)"
+            )
         }
 
         logger.info("HTTP transport connected")
@@ -260,8 +261,8 @@ public actor StreamableHTTPTransport: Transport {
                                         // Construct the new endpoint URL using the original scheme and host
                                         let portString = endpoint.port.map { ":\($0)" } ?? ""
                                         if let newEndpoint = URL(
-                                            string: "\(scheme)://\(host)\(portString)\(eventData)")
-                                        {
+                                            string: "\(scheme)://\(host)\(portString)\(eventData)"
+                                        ) {
                                             endpoint = newEndpoint
                                             logger.info(
                                                 "Received new endpoint via SSE: \(newEndpoint.absoluteString)"
@@ -385,6 +386,8 @@ public actor StreamableHTTPTransport: Transport {
             sessionID = newSessionID
         }
 
+        let contentType = httpResponse.value(forHTTPHeaderField: "Content-Type")
+
         func consumeBody(_ stream: URLSession.AsyncBytes) async throws -> String {
             var data = Data()
             for try await byte in stream {
@@ -395,7 +398,11 @@ public actor StreamableHTTPTransport: Transport {
 
         switch httpResponse.statusCode {
         case 200, 201, 202:
-            isListeningForServerEvents = true
+            if let contentType, contentType.starts(with: "text/event-stream") {
+                isListeningForServerEvents = true
+            } else {
+                throw MCPError.methodNotFound("Returned content type: \(contentType ?? "<nil>")")
+            }
 
         case 400:
             let rawBody = try? await consumeBody(stream)
@@ -404,7 +411,8 @@ public actor StreamableHTTPTransport: Transport {
 
         case 401:
             let wwwAuthenticateHeader = httpResponse.value(
-                forHTTPHeaderField: "WWW-Authenticate")
+                forHTTPHeaderField: "WWW-Authenticate"
+            )
             throw MCPError.unauthorized(wwwAuthenticateHeader)
 
         case 404:
