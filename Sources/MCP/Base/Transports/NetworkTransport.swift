@@ -1,9 +1,37 @@
-import Logging
-
+import class Foundation.NSLock
 import struct Foundation.Data
+import Logging
 
 #if canImport(Network)
     import Network
+
+    private final class OneShotContinuation<Value: Sendable>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var continuation: CheckedContinuation<Value, Swift.Error>?
+
+        init(_ continuation: CheckedContinuation<Value, Swift.Error>) {
+            self.continuation = continuation
+        }
+
+        func resume(returning value: Value) {
+            let continuation = takeContinuation()
+            continuation?.resume(returning: value)
+        }
+
+        func resume(throwing error: Swift.Error) {
+            let continuation = takeContinuation()
+            continuation?.resume(throwing: error)
+        }
+
+        private func takeContinuation() -> CheckedContinuation<Value, Swift.Error>? {
+            lock.lock()
+            defer { lock.unlock() }
+
+            let continuation = continuation
+            self.continuation = nil
+            return continuation
+        }
+    }
 
     /// Network connection based transport implementation
     public actor NetworkTransport: Transport {
@@ -14,22 +42,22 @@ import struct Foundation.Data
         private let messageStream: AsyncThrowingStream<Data, Swift.Error>
         private let messageContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
 
-        // Track connection state for continuations
+        /// Track connection state for continuations
         private var connectionContinuationResumed = false
 
         public init(connection: NWConnection, logger: Logger? = nil) {
             self.connection = connection
             self.logger =
                 logger
-                ?? Logger(
-                    label: "mcp.transport.network",
-                    factory: { _ in SwiftLogNoOpLogHandler() }
-                )
+                    ?? Logger(
+                        label: "mcp.transport.network",
+                        factory: { _ in SwiftLogNoOpLogHandler() }
+                    )
 
             // Create message stream
             var continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation!
-            self.messageStream = AsyncThrowingStream { continuation = $0 }
-            self.messageContinuation = continuation
+            messageStream = AsyncThrowingStream { continuation = $0 }
+            messageContinuation = continuation
         }
 
         /// Connects to the network transport
@@ -54,9 +82,10 @@ import struct Foundation.Data
                         switch state {
                         case .ready:
                             await self.handleConnectionReady(continuation: continuation)
-                        case .failed(let error):
+                        case let .failed(error):
                             await self.handleConnectionFailed(
-                                error: error, continuation: continuation)
+                                error: error, continuation: continuation
+                            )
                         case .cancelled:
                             await self.handleConnectionCancelled(continuation: continuation)
                         default:
@@ -127,9 +156,6 @@ import struct Foundation.Data
             var messageWithNewline = message
             messageWithNewline.append(UInt8(ascii: "\n"))
 
-            // Use a local actor-isolated variable to track continuation state
-            var sendContinuationResumed = false
-
             try await withCheckedThrowingContinuation {
                 [weak self] (continuation: CheckedContinuation<Void, Swift.Error>) in
                 guard let self = self else {
@@ -137,24 +163,25 @@ import struct Foundation.Data
                     return
                 }
 
+                let oneShot = OneShotContinuation(continuation)
+
                 connection.send(
                     content: messageWithNewline,
                     completion: .contentProcessed { [weak self] error in
                         guard let self = self else { return }
 
-                        Task { @MainActor in
-                            if !sendContinuationResumed {
-                                sendContinuationResumed = true
-                                if let error = error {
-                                    self.logger.error("Send error: \(error)")
-                                    continuation.resume(
-                                        throwing: MCPError.internalError("Send error: \(error)"))
-                                } else {
-                                    continuation.resume()
-                                }
+                        Task {
+                            if let error = error {
+                                self.logger.error("Send error: \(error)")
+                                oneShot.resume(
+                                    throwing: MCPError.internalError("Send error: \(error)")
+                                )
+                            } else {
+                                oneShot.resume(returning: ())
                             }
                         }
-                    })
+                    }
+                )
             }
         }
 
@@ -176,7 +203,7 @@ import struct Foundation.Data
         private func receiveLoop() async {
             var buffer = Data()
 
-            while isConnected && !Task.isCancelled {
+            while isConnected, !Task.isCancelled {
                 do {
                     let newData = try await receiveData()
                     buffer.append(newData)
@@ -188,7 +215,8 @@ import struct Foundation.Data
 
                         if !messageData.isEmpty {
                             logger.debug(
-                                "Message received", metadata: ["size": "\(messageData.count)"])
+                                "Message received", metadata: ["size": "\(messageData.count)"]
+                            )
                             messageContinuation.yield(Data(messageData))
                         }
                     }
@@ -211,8 +239,6 @@ import struct Foundation.Data
         }
 
         private func receiveData() async throws -> Data {
-            var receiveContinuationResumed = false
-
             return try await withCheckedThrowingContinuation {
                 [weak self] (continuation: CheckedContinuation<Data, Swift.Error>) in
                 guard let self = self else {
@@ -220,19 +246,19 @@ import struct Foundation.Data
                     return
                 }
 
+                let oneShot = OneShotContinuation(continuation)
+
                 connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) {
                     content, _, _, error in
                     Task { @MainActor in
-                        if !receiveContinuationResumed {
-                            receiveContinuationResumed = true
-                            if let error = error {
-                                continuation.resume(throwing: MCPError.transportError(error))
-                            } else if let content = content {
-                                continuation.resume(returning: content)
-                            } else {
-                                continuation.resume(
-                                    throwing: MCPError.internalError("No data received"))
-                            }
+                        if let error = error {
+                            oneShot.resume(throwing: MCPError.transportError(error))
+                        } else if let content = content {
+                            oneShot.resume(returning: content)
+                        } else {
+                            oneShot.resume(
+                                throwing: MCPError.internalError("No data received")
+                            )
                         }
                     }
                 }
