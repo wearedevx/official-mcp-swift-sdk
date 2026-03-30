@@ -120,6 +120,12 @@ public actor StreamableHTTPTransport: Transport {
             request = try await requestModifier(request)
         }
 
+        let headers = request.allHTTPHeaderFields ?? [:]
+        let headerPairs = headers.map { key, value in "\(key): \(value)" }
+        let headerBlock = headerPairs.joined(separator: "\n")
+
+        logger.info("Sending request", metadata: ["url": "\(request.url!.absoluteString)", "headers": "\(headerBlock)"])
+
         let (stream, response) = try await session.bytes(for: request)
 
         guard let httpResponse = response as? HTTPURLResponse else {
@@ -132,7 +138,7 @@ public actor StreamableHTTPTransport: Transport {
         // Extract session ID if present
         if let newSessionID = httpResponse.value(forHTTPHeaderField: "Mcp-Session-Id") {
             sessionID = newSessionID
-            logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
+            logger.info("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
         }
 
         func consumeBody(_ stream: URLSession.AsyncBytes) async -> String {
@@ -181,6 +187,7 @@ public actor StreamableHTTPTransport: Transport {
 
         case 401:
             let wwwAuthenticate = httpResponse.value(forHTTPHeaderField: "WWW-Authenticate")
+            logger.warning("Unauthorized -> \(wwwAuthenticate ?? "<nil>")")
             throw MCPError.unauthorized(wwwAuthenticate)
 
         case 404:
@@ -280,7 +287,7 @@ public actor StreamableHTTPTransport: Transport {
                                 } else {
                                     // Default event type is "message" if not specified
                                     if let data = eventData.data(using: .utf8) {
-                                        logger.debug(
+                                        logger.info(
                                             "SSE event received",
                                             metadata: [
                                                 "type":
@@ -413,6 +420,7 @@ public actor StreamableHTTPTransport: Transport {
             let wwwAuthenticateHeader = httpResponse.value(
                 forHTTPHeaderField: "WWW-Authenticate"
             )
+            logger.warning("Unauthorized -> \(wwwAuthenticateHeader ?? "<nil>")")
             throw MCPError.unauthorized(wwwAuthenticateHeader)
 
         case 404:
@@ -449,7 +457,7 @@ public actor StreamableHTTPTransport: Transport {
                 break
             } catch let MCPError.unauthorized(wwwAuthenticateHeader) {
                 eventListeningError = MCPError.unauthorized(wwwAuthenticateHeader)
-                logger.error("Unauthorized")
+                logger.error("Unauthorized -> \(wwwAuthenticateHeader ?? "<nil>")")
                 break
             } catch MCPError.methodNotFound {
                 eventListeningError = MCPError.methodNotFound("Method not found")

@@ -72,7 +72,7 @@ public actor OAuthHTTPClientTransport: Transport {
         let discoveryConfig = try! OAuthConfiguration(
             authorizationEndpoint: URL(string: "https://discovery.pending")!,
             tokenEndpoint: URL(string: "https://discovery.pending")!,
-            clientId: UUID().uuidString  // Temporary ID for discovery
+            clientId: UUID().uuidString // Temporary ID for discovery
         )
 
         return OAuthHTTPClientTransport(
@@ -104,7 +104,7 @@ public actor OAuthHTTPClientTransport: Transport {
         let discoveryConfig = try! OAuthConfiguration(
             authorizationEndpoint: URL(string: "https://discovery.pending")!,
             tokenEndpoint: URL(string: "https://discovery.pending")!,
-            clientId: UUID().uuidString  // Temporary ID for discovery
+            clientId: UUID().uuidString // Temporary ID for discovery
         )
 
         return OAuthHTTPClientTransport(
@@ -327,12 +327,18 @@ public actor OAuthHTTPClientTransport: Transport {
         } catch let MCPError.unauthorized(wwwAuthenticateHeader) {
             logger.info("Received 401 response, attempting MCP OAuth discovery")
 
-            try await performMCPOAuthDiscovery(wwwAuthenticateHeader: wwwAuthenticateHeader)
+            do {
+                try await performMCPOAuthDiscovery(wwwAuthenticateHeader: wwwAuthenticateHeader)
 
-            // Retry the request with the new token
-            try await baseTransport.send(data)
+                // Retry the request with the new token
+                try await baseTransport.send(data)
+            } catch {
+                logger.error("Auto-Authentication failed: \(error)")
+                throw error
+            }
 
         } catch {
+            logger.error("Sending failed: \(error)")
             throw error
         }
     }
@@ -368,7 +374,7 @@ public actor OAuthHTTPClientTransport: Transport {
     /// For example: https://example.com/mcp -> https://example.com
     private func getBaseDomainURL(from url: URL) -> URL? {
         guard let scheme = url.scheme,
-            let host = url.host
+              let host = url.host
         else {
             return nil
         }
@@ -384,7 +390,7 @@ public actor OAuthHTTPClientTransport: Transport {
     private func isAuthenticationError(_ error: Swift.Error) -> Bool {
         // Check if this is an MCP authentication error
         if let mcpError = error as? MCPError,
-            case .internalError(let message) = mcpError
+           case let .internalError(message) = mcpError
         {
             return (message?.contains("Authentication required") ?? false)
                 || (message?.contains("Access forbidden") ?? false)
@@ -400,14 +406,15 @@ public actor OAuthHTTPClientTransport: Transport {
         logger.info("Step 1/4: Discovering OAuth server metadata...")
 
         let (_, discoveryDocument) = try await discoverOAuthServerMetadata(
-            wwwAuthenticateHeader: wwwAuthenticateHeader)
+            wwwAuthenticateHeader: wwwAuthenticateHeader
+        )
 
         logger.info("Step 1/4: OAuth server metadata discovered successfully")
 
         // Check if dynamic client registration is available and needed
         if let registrationEndpoint = discoveryDocument.registrationEndpoint,
-            let redirectURI = self.redirectURI,
-            let clientName = self.clientName
+           let redirectURI = redirectURI,
+           let clientName = clientName
         {
             logger.info("Step 2/4: Registration endpoint found, performing automatic client registration...")
 
@@ -519,8 +526,7 @@ public actor OAuthHTTPClientTransport: Transport {
         // Step 3: Select the first authorization server from the metadata
         let authServerURL =
             if let firstAuthServerString = metadata?.authorizationServers?.first,
-                let url = URL(string: firstAuthServerString)
-            {
+            let url = URL(string: firstAuthServerString) {
                 url
             } else {
                 // If no metadata URLs were found, try to use the endpoint URL
@@ -528,11 +534,13 @@ public actor OAuthHTTPClientTransport: Transport {
             }
 
         logger.info(
-            "Found authorization server", metadata: ["server": "\(authServerURL.absoluteString)"])
+            "Found authorization server", metadata: ["server": "\(authServerURL.absoluteString)"]
+        )
 
         // Step 4: Discover authorization server metadata using MCP priority order
         let discoveryDocument = try await authenticator.discoverAuthorizationServerMetadata(
-            from: authServerURL)
+            from: authServerURL
+        )
 
         // Step 5: Validate PKCE support (required by MCP)
         try await authenticator.validatePKCESupport(in: discoveryDocument)
@@ -582,9 +590,9 @@ public actor OAuthHTTPClientTransport: Transport {
             clientType: originalConfig.clientType,
             scopes: discoveryDocument.scopesSupported ?? [],
             redirectURI: includeRedirectURI
-                ? (self.redirectURI ?? originalConfig.redirectURI) : nil,
+                ? (redirectURI ?? originalConfig.redirectURI) : nil,
             usePKCE: usePKCE,
-            resourceIndicator: endpoint.absoluteString  // MCP server as resource
+            resourceIndicator: endpoint.absoluteString // MCP server as resource
         )
     }
 
@@ -603,8 +611,8 @@ public actor OAuthHTTPClientTransport: Transport {
         clientName: String,
         redirectURIs: [URL],
         scopes: [String] = [],
-        softwareId: String? = nil,
-        softwareVersion: String? = nil
+        softwareId _: String? = nil,
+        softwareVersion _: String? = nil
     ) async throws -> OAuthConfiguration {
         logger.info("Starting dynamic client registration")
 
@@ -635,7 +643,7 @@ public actor OAuthHTTPClientTransport: Transport {
             tokenEndpoint: discoveryDocument.tokenEndpoint,
             revocationEndpoint: discoveryDocument.revocationEndpoint,
             clientId: registration.clientId,
-            clientSecret: registration.clientSecret,  // Will be nil for public clients
+            clientSecret: registration.clientSecret, // Will be nil for public clients
             scopes: scopes,
             redirectURI: redirectURIs.first,
             resourceIndicator: endpoint.absoluteString
@@ -650,7 +658,8 @@ public actor OAuthHTTPClientTransport: Transport {
         )
 
         logger.info(
-            "Dynamic registration complete", metadata: ["clientId": "\(registration.clientId)"])
+            "Dynamic registration complete", metadata: ["clientId": "\(registration.clientId)"]
+        )
         return newConfig
     }
 
@@ -681,9 +690,9 @@ public actor OAuthHTTPClientTransport: Transport {
 
 // MARK: - Convenience Initializers
 
-extension OAuthHTTPClientTransport {
+public extension OAuthHTTPClientTransport {
     /// Creates an OAuth transport with client credentials flow
-    public static func clientCredentials(
+    static func clientCredentials(
         endpoint: URL,
         tokenEndpoint: URL,
         clientId: String,
@@ -693,7 +702,7 @@ extension OAuthHTTPClientTransport {
         logger: Logger? = nil
     ) throws -> OAuthHTTPClientTransport {
         let config = try OAuthConfiguration(
-            authorizationEndpoint: tokenEndpoint,  // Not used for client credentials
+            authorizationEndpoint: tokenEndpoint, // Not used for client credentials
             tokenEndpoint: tokenEndpoint,
             clientId: clientId,
             clientSecret: clientSecret,

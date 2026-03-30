@@ -137,6 +137,8 @@ public actor HTTPClientTransport: Actor, Transport {
         let headerPairs = headers.map { key, value in "\(key): \(value)" }
         let headerBlock = headerPairs.joined(separator: "\n")
 
+        logger.info("Sending request", metadata: ["url": "\(request.url!.absoluteString)", "headers": "\(headerBlock)"])
+
         let (responseData, response) = try await session.data(for: request)
 
         guard let httpResponse = response as? HTTPURLResponse else {
@@ -149,7 +151,7 @@ public actor HTTPClientTransport: Actor, Transport {
         // Extract session ID if present
         if let newSessionID = httpResponse.value(forHTTPHeaderField: "Mcp-Session-Id") {
             sessionID = newSessionID
-            logger.debug("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
+            logger.info("Session ID received", metadata: ["sessionID": "\(newSessionID)"])
         }
 
         // Handle different response types
@@ -157,14 +159,14 @@ public actor HTTPClientTransport: Actor, Transport {
         case 200, 201, 202:
             // For SSE, the processing happens in the streaming task
             if contentType.contains("text/event-stream") {
-                logger.debug("Received SSE response, processing in streaming task")
+                logger.info("Received SSE response, processing in streaming task")
                 // The streaming is handled by the SSE task if active
                 return
             }
 
             // For JSON responses, deliver the data directly
             if contentType.contains("application/json"), !responseData.isEmpty {
-                logger.debug("Received JSON response", metadata: ["size": "\(responseData.count)"])
+                logger.info("Received JSON response", metadata: ["size": "\(responseData.count)"])
                 messageContinuation.yield(responseData)
             }
 
@@ -260,7 +262,7 @@ public actor HTTPClientTransport: Actor, Transport {
                 request = await requestModifier(request)
             }
 
-            logger.debug("Starting SSE connection")
+            logger.info("Starting SSE connection")
 
             guard isConnected else { return }
             // Create URLSession task for SSE
@@ -355,8 +357,8 @@ public actor HTTPClientTransport: Actor, Transport {
                                             let portString = endpoint.port.map { ":\($0)" } ?? ""
                                             if let newEndpoint = URL(
                                                 string:
-                                                "\(scheme)://\(host)\(portString)\(eventData)")
-                                            {
+                                                "\(scheme)://\(host)\(portString)\(eventData)"
+                                            ) {
                                                 endpointPostURL = newEndpoint
                                                 logger.info(
                                                     "Received new endpoint via SSE: \(newEndpoint.absoluteString)"
@@ -374,7 +376,7 @@ public actor HTTPClientTransport: Actor, Transport {
                                     } else {
                                         // Default event type is "message" if not specified
                                         if let data = eventData.data(using: .utf8) {
-                                            logger.debug(
+                                            logger.info(
                                                 "SSE event received",
                                                 metadata: [
                                                     "type":
