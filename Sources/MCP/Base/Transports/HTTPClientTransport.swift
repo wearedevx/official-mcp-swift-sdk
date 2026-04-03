@@ -133,11 +133,7 @@ public actor HTTPClientTransport: Actor, Transport {
             request = await requestModifier(request)
         }
 
-        let headers = request.allHTTPHeaderFields ?? [:]
-        let headerPairs = headers.map { key, value in "\(key): \(value)" }
-        let headerBlock = headerPairs.joined(separator: "\n")
-
-        logger.info("Sending request", metadata: ["url": "\(request.url!.absoluteString)", "headers": "\(headerBlock)"])
+        logger.info("Sending request", metadata: ["url": "\(request.url!.absoluteString)"])
 
         let (responseData, response) = try await session.data(for: request)
 

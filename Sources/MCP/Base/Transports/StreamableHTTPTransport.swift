@@ -120,11 +120,7 @@ public actor StreamableHTTPTransport: Transport {
             request = try await requestModifier(request)
         }
 
-        let headers = request.allHTTPHeaderFields ?? [:]
-        let headerPairs = headers.map { key, value in "\(key): \(value)" }
-        let headerBlock = headerPairs.joined(separator: "\n")
-
-        logger.info("Sending request", metadata: ["url": "\(request.url!.absoluteString)", "headers": "\(headerBlock)"])
+        logger.info("Sending request", metadata: ["url": "\(request.url!.absoluteString)"])
 
         let (stream, response) = try await session.bytes(for: request)
 
