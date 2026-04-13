@@ -204,15 +204,7 @@ public actor StreamableHTTPTransport: Transport {
     }
 
     public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
-        // Finish any existing stream/coninaution and create a new one,
-        // because we can't more than one task listening of het same stream
-        messageContinuation.finish()
-
-        let (stream, continuation) = AsyncThrowingStream<Data, Swift.Error>.makeStream()
-        messageContinuation = continuation
-        messageStream = stream
-
-        return stream
+        return messageStream
     }
 
     private func decodeSSEStream(

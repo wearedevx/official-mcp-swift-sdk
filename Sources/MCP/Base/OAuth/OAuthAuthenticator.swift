@@ -109,9 +109,26 @@ public actor OAuthAuthenticator {
         }
     }
 
+    struct TokenEndpointResponse: Decodable {
+        let accessToken: String
+        let tokenType: String?
+        let expiresIn: Int?
+        let refreshToken: String?
+        let scope: String?
+
+        enum CodingKeys: String, CodingKey {
+            case accessToken = "access_token"
+            case tokenType = "token_type"
+            case expiresIn = "expires_in"
+            case refreshToken = "refresh_token"
+            case scope
+        }
+    }
+
     /// OAuth errors
     public enum OAuthError: LocalizedError {
         case redirectURIRequired
+        case redirectURIResolutionFailed(String)
         case invalidAuthorizationURL
         case invalidResponse
         case stateMismatch
@@ -132,6 +149,8 @@ public actor OAuthAuthenticator {
         public var errorDescription: String? {
             switch self {
             case .redirectURIRequired: return "Redirect URI is required"
+            case let .redirectURIResolutionFailed(reason):
+                return "Failed to resolve redirect URI: \(reason)"
             case .invalidAuthorizationURL: return "Invalid authorization URL"
             case .invalidResponse: return "Invalid HTTP response"
             case .stateMismatch: return "State mismatch causing potential CSRF issue"
@@ -169,12 +188,13 @@ public actor OAuthAuthenticator {
     /// Authenticate using OAuth 2.0 Authorization Code Flow with PKCE
     /// This will trigger the system browser to open the authorization URL.
     /// The application MUST handle the callback URL and pass it to OAuthSwift.handle(url:)
-    public func authenticate(identifier: String = "default") async throws -> OAuthToken {
+    public func authenticate(
+        identifier: String = "default",
+        redirectURIOverride: URL? = nil
+    ) async throws -> OAuthToken {
         logger.info("Starting authentication with PKCE")
 
-        guard let redirectURI = configuration.redirectURI else {
-            throw OAuthError.redirectURIRequired
-        }
+        let redirectURI = try await resolveRedirectURI(override: redirectURIOverride)
 
         return try await withCheckedThrowingContinuation {
             (continuation: CheckedContinuation<OAuthToken, Swift.Error>) in
@@ -238,6 +258,77 @@ public actor OAuthAuthenticator {
                 }
             }
         }
+    }
+
+    public func authenticateClientCredentials(identifier: String = "default") async throws -> OAuthToken {
+        logger.info("Starting client credentials authentication")
+
+        guard configuration.clientType == .confidential,
+              let clientSecret = configuration.clientSecret
+        else {
+            throw OAuthError.invalidConfiguration(
+                "Client credentials flow requires a confidential client")
+        }
+
+        var request = URLRequest(url: configuration.tokenEndpoint)
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        var queryItems = [URLQueryItem(name: "grant_type", value: "client_credentials")]
+        queryItems.append(URLQueryItem(name: "client_id", value: configuration.clientId))
+        queryItems.append(URLQueryItem(name: "client_secret", value: clientSecret))
+
+        if !configuration.scopes.isEmpty {
+            queryItems.append(
+                URLQueryItem(name: "scope", value: configuration.scopes.joined(separator: " ")))
+        }
+
+        if let resourceIndicator = configuration.resourceIndicator {
+            queryItems.append(URLQueryItem(name: "resource", value: resourceIndicator))
+        }
+
+        if let additionalParameters = configuration.additionalParameters {
+            for (key, value) in additionalParameters {
+                queryItems.append(URLQueryItem(name: key, value: value))
+            }
+        }
+
+        var components = URLComponents()
+        components.queryItems = queryItems
+        request.httpBody = components.percentEncodedQuery?.data(using: .utf8)
+
+        let (data, response) = try await urlSession.data(for: request)
+
+        if let httpResponse = response as? HTTPURLResponse,
+           !(200 ..< 300).contains(httpResponse.statusCode)
+        {
+            let stringBody = String(data: data, encoding: .utf8) ?? ""
+            throw OAuthError.tokenRequestFailed(httpResponse.statusCode, stringBody)
+        }
+
+        let tokenResponse: TokenEndpointResponse
+        do {
+            tokenResponse = try JSONDecoder().decode(TokenEndpointResponse.self, from: data)
+        } catch {
+            throw OAuthError.invalidTokenResponse("\(error)")
+        }
+
+        let token = OAuthToken(
+            accessToken: tokenResponse.accessToken,
+            tokenType: tokenResponse.tokenType ?? "Bearer",
+            expiresIn: tokenResponse.expiresIn ?? 0,
+            refreshToken: tokenResponse.refreshToken,
+            scope: tokenResponse.scope ?? configuration.scopes.joined(separator: " "),
+            issuedAt: Date(),
+            clientId: configuration.clientId,
+            authorizationEndpoint: configuration.authorizationEndpoint,
+            tokenEndpoint: configuration.tokenEndpoint
+        )
+
+        try await tokenStorage.store(token: token, for: identifier)
+        currentToken = token
+        return token
     }
 
     private func handleAuthenticationSuccess(
@@ -308,7 +399,7 @@ public actor OAuthAuthenticator {
                             clientSecret: configuration.clientSecret,
                             clientType: configuration.clientType,
                             scopes: restoredScopes,
-                            redirectURI: configuration.redirectURI,
+                            redirectURIResolver: configuration.redirectURIResolver,
                             additionalParameters: configuration.additionalParameters,
                             usePKCE: configuration.usePKCE,
                             pkceCodeChallengeMethod: configuration.pkceCodeChallengeMethod,
@@ -471,6 +562,24 @@ public actor OAuthAuthenticator {
 
     // MARK: - Helpers
 
+    private func resolveRedirectURI(override redirectURIOverride: URL?) async throws -> URL {
+        if let redirectURIOverride {
+            return redirectURIOverride
+        }
+
+        do {
+            guard let redirectURI = try await configuration.resolveRedirectURI() else {
+                throw OAuthError.redirectURIRequired
+            }
+
+            return redirectURI
+        } catch let error as OAuthError {
+            throw error
+        } catch {
+            throw OAuthError.redirectURIResolutionFailed("\(error)")
+        }
+    }
+
     private func createToken(accessToken: String, refreshToken: String, expiresAt: Date?)
         -> OAuthToken
     {
@@ -517,7 +626,7 @@ public actor OAuthAuthenticator {
     public func fetchDiscoveryDocument(from discoveryURL: URL) async throws
         -> OAuthDiscoveryDocument
     {
-        let (data, _) = try await URLSession.shared.data(from: discoveryURL)
+        let (data, _) = try await urlSession.data(from: discoveryURL)
         return try JSONDecoder().decode(OAuthDiscoveryDocument.self, from: data)
     }
 
@@ -591,7 +700,7 @@ public actor OAuthAuthenticator {
     {
         var request = URLRequest(url: metadataURL)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        let (data, _) = try await URLSession.shared.data(for: request)
+        let (data, _) = try await urlSession.data(for: request)
         return try JSONDecoder().decode(ProtectedResourceMetadata.self, from: data)
     }
 
@@ -617,7 +726,7 @@ public actor OAuthAuthenticator {
         }
 
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await urlSession.data(for: request)
 
         if let httpResponse = response as? HTTPURLResponse {
             let statusCode = httpResponse.statusCode

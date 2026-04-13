@@ -28,6 +28,8 @@ public enum OAuthClientType: Sendable {
 
 /// Configuration for OAuth 2.0/2.1 authentication with MCP support
 public struct OAuthConfiguration: Sendable {
+    public typealias RedirectURIResolver = @Sendable () async throws -> URL
+
     /// The authorization endpoint URL
     public let authorizationEndpoint: URL
 
@@ -49,8 +51,11 @@ public struct OAuthConfiguration: Sendable {
     /// The requested scopes
     public let scopes: [String]
 
-    /// The redirect URI (required for authorization code flows)
-    public let redirectURI: URL?
+    /// Resolver for the redirect URI used by interactive authentication flows.
+    ///
+    /// This is evaluated lazily when interactive authentication begins so callers can
+    /// perform any async setup needed to determine the callback URL.
+    public let redirectURIResolver: RedirectURIResolver?
 
     /// Additional parameters to include in requests
     public let additionalParameters: [String: String]?
@@ -72,7 +77,7 @@ public struct OAuthConfiguration: Sendable {
         clientSecret: String? = nil,
         clientType: OAuthClientType? = nil,
         scopes: [String] = [],
-        redirectURI: URL? = nil,
+        redirectURIResolver: RedirectURIResolver? = nil,
         additionalParameters: [String: String]? = nil,
         usePKCE: Bool? = nil,
         pkceCodeChallengeMethod: PKCECodeChallengeMethod = .S256,
@@ -92,7 +97,7 @@ public struct OAuthConfiguration: Sendable {
         }
 
         self.scopes = scopes
-        self.redirectURI = redirectURI
+        self.redirectURIResolver = redirectURIResolver
         self.additionalParameters = additionalParameters
 
         // OAuth 2.1 requires PKCE for public clients
@@ -128,6 +133,48 @@ public struct OAuthConfiguration: Sendable {
             throw OAuthConfigurationError.publicClientWithoutPKCE
         }
     }
+
+    public init(
+        authorizationEndpoint: URL,
+        tokenEndpoint: URL,
+        revocationEndpoint: URL? = nil,
+        clientId: String,
+        clientSecret: String? = nil,
+        clientType: OAuthClientType? = nil,
+        scopes: [String] = [],
+        redirectURI: URL? = nil,
+        additionalParameters: [String: String]? = nil,
+        usePKCE: Bool? = nil,
+        pkceCodeChallengeMethod: PKCECodeChallengeMethod = .S256,
+        resourceIndicator: String? = nil
+    ) throws {
+        try self.init(
+            authorizationEndpoint: authorizationEndpoint,
+            tokenEndpoint: tokenEndpoint,
+            revocationEndpoint: revocationEndpoint,
+            clientId: clientId,
+            clientSecret: clientSecret,
+            clientType: clientType,
+            scopes: scopes,
+            redirectURIResolver: redirectURI.map(Self.constantRedirectURIResolver),
+            additionalParameters: additionalParameters,
+            usePKCE: usePKCE,
+            pkceCodeChallengeMethod: pkceCodeChallengeMethod,
+            resourceIndicator: resourceIndicator
+        )
+    }
+
+    public func resolveRedirectURI() async throws -> URL? {
+        guard let redirectURIResolver else {
+            return nil
+        }
+
+        return try await redirectURIResolver()
+    }
+
+    private static func constantRedirectURIResolver(_ redirectURI: URL) -> RedirectURIResolver {
+        { redirectURI }
+    }
 }
 
 /// PKCE code challenge methods as defined in RFC 7636
@@ -146,7 +193,7 @@ extension OAuthConfiguration {
         clientId: String,
         clientSecret: String? = nil,
         scopes: [String] = ["read:user"],
-        redirectURI: URL? = nil,
+        redirectURIResolver: RedirectURIResolver? = nil,
         usePKCE: Bool? = nil
     ) throws -> OAuthConfiguration {
         let clientType: OAuthClientType = clientSecret != nil ? .confidential : .public
@@ -168,7 +215,7 @@ extension OAuthConfiguration {
             clientSecret: clientSecret,
             clientType: clientType,
             scopes: scopes,
-            redirectURI: redirectURI,
+            redirectURIResolver: redirectURIResolver,
             usePKCE: usePKCE ?? (clientType == .public)
         )
     }
@@ -178,7 +225,7 @@ extension OAuthConfiguration {
         clientId: String,
         clientSecret: String? = nil,
         scopes: [String] = ["openid", "profile", "email"],
-        redirectURI: URL? = nil,
+        redirectURIResolver: RedirectURIResolver? = nil,
         usePKCE: Bool? = nil
     ) throws -> OAuthConfiguration {
         let clientType: OAuthClientType = clientSecret != nil ? .confidential : .public
@@ -199,7 +246,7 @@ extension OAuthConfiguration {
             clientSecret: clientSecret,
             clientType: clientType,
             scopes: scopes,
-            redirectURI: redirectURI,
+            redirectURIResolver: redirectURIResolver,
             usePKCE: usePKCE ?? (clientType == .public)
         )
     }
@@ -210,7 +257,7 @@ extension OAuthConfiguration {
         clientSecret: String? = nil,
         tenantId: String = "common",
         scopes: [String] = ["User.Read"],
-        redirectURI: URL? = nil,
+        redirectURIResolver: RedirectURIResolver? = nil,
         usePKCE: Bool? = nil
     ) throws -> OAuthConfiguration {
         let clientType: OAuthClientType = clientSecret != nil ? .confidential : .public
@@ -235,7 +282,7 @@ extension OAuthConfiguration {
             clientSecret: clientSecret,
             clientType: clientType,
             scopes: scopes,
-            redirectURI: redirectURI,
+            redirectURIResolver: redirectURIResolver,
             usePKCE: usePKCE ?? (clientType == .public)
         )
     }
@@ -247,7 +294,7 @@ extension OAuthConfiguration {
         revocationEndpoint: URL? = nil,
         clientId: String,
         scopes: [String] = [],
-        redirectURI: URL,
+        redirectURIResolver: @escaping RedirectURIResolver,
         additionalParameters: [String: String]? = nil,
         resourceIndicator: String? = nil
     ) throws -> OAuthConfiguration {
@@ -259,7 +306,7 @@ extension OAuthConfiguration {
             clientSecret: nil,
             clientType: .public,
             scopes: scopes,
-            redirectURI: redirectURI,
+            redirectURIResolver: redirectURIResolver,
             additionalParameters: additionalParameters,
             usePKCE: true,  // OAuth 2.1 mandatory for public clients
             pkceCodeChallengeMethod: .S256,  // Will fallback to .plain if crypto unavailable
@@ -275,7 +322,7 @@ extension OAuthConfiguration {
         clientId: String,
         clientSecret: String,
         scopes: [String] = [],
-        redirectURI: URL? = nil,
+        redirectURIResolver: RedirectURIResolver? = nil,
         additionalParameters: [String: String]? = nil,
         usePKCE: Bool = false,
         resourceIndicator: String? = nil
@@ -288,7 +335,7 @@ extension OAuthConfiguration {
             clientSecret: clientSecret,
             clientType: .confidential,
             scopes: scopes,
-            redirectURI: redirectURI,
+            redirectURIResolver: redirectURIResolver,
             additionalParameters: additionalParameters,
             usePKCE: usePKCE,
             pkceCodeChallengeMethod: .S256,
@@ -318,7 +365,7 @@ extension OAuthConfiguration {
             clientId: registrationResponse.clientId,
             clientSecret: registrationResponse.clientSecret,
             scopes: scopes,
-            redirectURI: redirectURI
+            redirectURIResolver: constantRedirectURIResolver(redirectURI)
         )
     }
 }

@@ -16,6 +16,8 @@ public actor HTTPClientTransport: Actor, Transport {
     public nonisolated let logger: Logger
     public var endpointCommunication: URL?
     private var isConnected = false
+    private var isListeningForServerEvents = false
+    private var eventListeningError: MCPError?
     private var messageStream: AsyncThrowingStream<Data, Swift.Error>
     private var messageContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
 
@@ -71,22 +73,33 @@ public actor HTTPClientTransport: Actor, Transport {
         guard !isConnected else { return }
         isConnected = true
 
-        if streaming {
-            // Start listening to server events
-            streamingTask = Task { await startListeningForServerEvents() }
+        guard streaming else {
+            logger.info("HTTP transport connected")
+            return
         }
+
+        eventListeningError = nil
+
+        // Start listening to server events
+        streamingTask = Task { await startListeningForServerEvents() }
 
         // wait for the connection to happen with a valid endpoint
         let timeoutNs = 45_000_000_000 // 45 seconds
         let sleepIntervalNs: UInt64 = 50_000_000 // 50 ms
         var elapsedNs: UInt64 = 0
 
-        while endpointPostURL == nil {
+        while !isListeningForServerEvents, eventListeningError == nil {
             if elapsedNs >= timeoutNs {
                 throw MCPError.internalError("Timeout waiting for valid endpoint from SSE")
             }
             try await Task.sleep(nanoseconds: sleepIntervalNs)
             elapsedNs += sleepIntervalNs
+        }
+
+        if let eventListeningError {
+            logger.warning(
+                "HTTP transport failed to connect: \(eventListeningError.localizedDescription)"
+            )
         }
 
         logger.info("HTTP transport connected")
@@ -190,15 +203,6 @@ public actor HTTPClientTransport: Actor, Transport {
 
     /// Receives data in an async sequence
     public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
-        // cloase previously existing streams so that we don’t have more than one task
-        // listening on the same stream
-        messageContinuation.finish()
-
-        let (stream, continuation) = AsyncThrowingStream<Data, Swift.Error>.makeStream()
-
-        messageContinuation = continuation
-        messageStream = stream
-
         return messageStream
     }
 
@@ -207,18 +211,22 @@ public actor HTTPClientTransport: Actor, Transport {
     /// Starts listening for server events using SSE
     private func startListeningForServerEvents() async {
         guard isConnected else { return }
+        isListeningForServerEvents = false
 
         // Retry loop for connection drops
         while isConnected, !Task.isCancelled {
             do {
                 try await connectToEventStream()
             } catch let MCPError.invalidParams(error) {
+                eventListeningError = MCPError.invalidParams(error)
                 logger.error("Invalid connection parameters: \(error ?? "unknow")")
                 break
-            } catch MCPError.unauthorized {
+            } catch let MCPError.unauthorized(wwwAuthenticateHeader) {
+                eventListeningError = MCPError.unauthorized(wwwAuthenticateHeader)
                 logger.error("Unauthorized")
                 break
             } catch MCPError.methodNotFound {
+                eventListeningError = MCPError.methodNotFound("Method not found")
                 logger.warning("Connection to MCP server does not support this method")
                 break
             } catch {
@@ -268,6 +276,8 @@ public actor HTTPClientTransport: Actor, Transport {
                 throw MCPError.internalError("Invalid HTTP response")
             }
 
+            let contentType = httpResponse.value(forHTTPHeaderField: "Content-Type") ?? ""
+
             func consumeBody(_ stream: URLSession.AsyncBytes) async -> String {
                 var data = Data()
                 do {
@@ -281,7 +291,12 @@ public actor HTTPClientTransport: Actor, Transport {
             }
 
             switch httpResponse.statusCode {
-            case 200: break
+            case 200:
+                if contentType.starts(with: "text/event-stream") {
+                    isListeningForServerEvents = true
+                } else {
+                    throw MCPError.methodNotFound("Returned content type: \(contentType)")
+                }
 
             case 400:
                 let rawBody = await consumeBody(stream)

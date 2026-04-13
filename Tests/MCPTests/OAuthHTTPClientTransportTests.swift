@@ -129,6 +129,22 @@ import Testing
         case sseConnectionAttempted
     }
 
+    actor RequestEventRecorder {
+        private var events: [String] = []
+
+        func record(_ event: String) {
+            events.append(event)
+        }
+
+        func snapshot() -> [String] {
+            events
+        }
+    }
+
+    enum RedirectResolverTestError: Swift.Error {
+        case failed
+    }
+
     // MARK: -
 
     @Suite("OAuth HTTP Client Transport Tests", .serialized)
@@ -147,7 +163,8 @@ import Testing
                 authorizationEndpoint: tokenEndpoint,
                 tokenEndpoint: tokenEndpoint,
                 clientId: "test-client",
-                clientSecret: "test-secret"
+                clientSecret: "test-secret",
+                redirectURIResolver: nil
             )
 
             let transport = OAuthHTTPClientTransport(
@@ -163,6 +180,15 @@ import Testing
             
             // 3. Setup Mock Handler for 401 Unauthorized (Triggering Discovery/Auth)
             await OAuthMockURLProtocol.setHandler { request in
+                // Expect Retry of Initialize Request with Token
+                if request.url == testEndpoint && request.httpMethod == "POST" && request.value(forHTTPHeaderField: "Authorization") == "Bearer new-access-token" {
+                     let responseData = #"{"jsonrpc":"2.0","result":{},"id":1}"#.data(using: .utf8)!
+                     let response = HTTPURLResponse(
+                        url: testEndpoint, statusCode: 200, httpVersion: "HTTP/1.1",
+                        headerFields: ["Content-Type": "application/json"])!
+                    return (response, responseData)
+                }
+
                 // Expect POST to endpoint
                 if request.url == testEndpoint && request.httpMethod == "POST" {
                      let response = HTTPURLResponse(
@@ -217,15 +243,6 @@ import Testing
                     return (response, tokenResponse)
                 }
                 
-                // Expect Retry of Initialize Request with Token
-                if request.url == testEndpoint && request.httpMethod == "POST" && request.value(forHTTPHeaderField: "Authorization") == "Bearer new-access-token" {
-                     let responseData = #"{"jsonrpc":"2.0","result":{},"id":1}"#.data(using: .utf8)!
-                     let response = HTTPURLResponse(
-                        url: testEndpoint, statusCode: 200, httpVersion: "HTTP/1.1",
-                        headerFields: ["Content-Type": "application/json"])!
-                    return (response, responseData)
-                }
-                
                 // FAIL if we see an SSE connection attempt (GET with text/event-stream)
                 if request.value(forHTTPHeaderField: "Accept") == "text/event-stream" {
                     throw OAuthMockURLProtocolError.sseConnectionAttempted
@@ -238,19 +255,194 @@ import Testing
             // Note: We do NOT call transport.connect() yet.
             try await transport.send(initializeRequest)
             
-            // 5. Now Call Connect (Should trigger SSE)
+            // Reaching this point confirms send() completed without an SSE connection attempt.
+        }
+
+        @Test("Dynamic discovery resolves redirect URI only when interactive auth begins", .oauthHttpClientTransportSetup)
+        func testDynamicDiscoveryResolvesRedirectURILazily() async throws {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [OAuthMockURLProtocol.self]
+
+            let events = RequestEventRecorder()
+            let transport = OAuthHTTPClientTransport.withDynamicDiscoveryAndHTTPStreaming(
+                endpoint: testEndpoint,
+                redirectURIResolver: {
+                    await events.record("resolver")
+                    throw RedirectResolverTestError.failed
+                },
+                clientName: "Test Client",
+                configuration: configuration,
+                logger: nil
+            )
+
+            #expect(await events.snapshot().isEmpty)
+
             await OAuthMockURLProtocol.setHandler { request in
-                 if request.value(forHTTPHeaderField: "Accept") == "text/event-stream" {
-                    // Success!
+                if request.url == testEndpoint && request.httpMethod == "POST" {
+                    await events.record("request-401")
+
                     let response = HTTPURLResponse(
-                        url: testEndpoint, statusCode: 200, httpVersion: "HTTP/1.1",
-                        headerFields: ["Content-Type": "text/event-stream"])!
+                        url: testEndpoint,
+                        statusCode: 401,
+                        httpVersion: "HTTP/1.1",
+                        headerFields: [
+                            "WWW-Authenticate": "Bearer realm=\"test\", resource_metadata=\"http://localhost:8080/.well-known/oauth-protected-resource\""
+                        ]
+                    )!
                     return (response, Data())
                 }
+
+                if request.url?.absoluteString == "http://localhost:8080/.well-known/oauth-protected-resource" {
+                    await events.record("protected-resource")
+
+                    let metadata = """
+                    {
+                        "authorization_servers": ["http://localhost:8080"],
+                        "resource": "http://localhost:8080/mcp"
+                    }
+                    """.data(using: .utf8)!
+                    let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+                    return (response, metadata)
+                }
+
+                if request.url?.absoluteString == "http://localhost:8080/.well-known/oauth-authorization-server" {
+                    await events.record("auth-discovery")
+
+                    let metadata = """
+                    {
+                        "issuer": "http://localhost:8080",
+                        "authorization_endpoint": "http://localhost:8080/authorize",
+                        "token_endpoint": "http://localhost:8080/token",
+                        "response_types_supported": ["code"],
+                        "code_challenge_methods_supported": ["S256"]
+                    }
+                    """.data(using: .utf8)!
+                    let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+                    return (response, metadata)
+                }
+
                 throw OAuthMockURLProtocolError.invalidURL
             }
-            
-            try await transport.connect()
+
+            let initializeRequest = #"{"jsonrpc":"2.0","method":"initialize","id":1}"#.data(using: .utf8)!
+
+            do {
+                try await transport.send(initializeRequest)
+                Issue.record("Expected dynamic discovery flow to fail when redirect URI resolution fails")
+            } catch let error as OAuthAuthenticator.OAuthError {
+                switch error {
+                case let .redirectURIResolutionFailed(reason):
+                    #expect(reason.contains("failed"))
+                default:
+                    Issue.record("Expected redirectURIResolutionFailed, got \(error)")
+                }
+            } catch {
+                Issue.record("Expected OAuthError, got \(error)")
+            }
+
+            #expect(await events.snapshot() == [
+                "request-401",
+                "protected-resource",
+                "auth-discovery",
+                "resolver",
+            ])
+        }
+
+        @Test("Dynamic registration resolves redirect URI once per auth session", .oauthHttpClientTransportSetup)
+        func testDynamicRegistrationResolvesRedirectURIOncePerSession() async throws {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [OAuthMockURLProtocol.self]
+
+            let events = RequestEventRecorder()
+            let transport = OAuthHTTPClientTransport.withDynamicDiscoveryAndHTTPStreaming(
+                endpoint: testEndpoint,
+                redirectURIResolver: {
+                    await events.record("resolver")
+                    return URL(string: "mcp-test://oauth/callback")!
+                },
+                clientName: "Test Client",
+                configuration: configuration,
+                logger: nil
+            )
+
+            await OAuthMockURLProtocol.setHandler { request in
+                if request.url == testEndpoint && request.httpMethod == "POST" {
+                    await events.record("request-401")
+
+                    let response = HTTPURLResponse(
+                        url: testEndpoint,
+                        statusCode: 401,
+                        httpVersion: "HTTP/1.1",
+                        headerFields: [
+                            "WWW-Authenticate": "Bearer realm=\"test\", resource_metadata=\"http://localhost:8080/.well-known/oauth-protected-resource\""
+                        ]
+                    )!
+                    return (response, Data())
+                }
+
+                if request.url?.absoluteString == "http://localhost:8080/.well-known/oauth-protected-resource" {
+                    await events.record("protected-resource")
+
+                    let metadata = """
+                    {
+                        "authorization_servers": ["http://localhost:8080"],
+                        "resource": "http://localhost:8080/mcp"
+                    }
+                    """.data(using: .utf8)!
+                    let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+                    return (response, metadata)
+                }
+
+                if request.url?.absoluteString == "http://localhost:8080/.well-known/oauth-authorization-server" {
+                    await events.record("auth-discovery")
+
+                    let metadata = """
+                    {
+                        "issuer": "http://localhost:8080",
+                        "authorization_endpoint": "http://localhost:8080/authorize",
+                        "token_endpoint": "http://localhost:8080/token",
+                        "registration_endpoint": "http://localhost:8080/register",
+                        "response_types_supported": ["code"],
+                        "code_challenge_methods_supported": ["S256"]
+                    }
+                    """.data(using: .utf8)!
+                    let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+                    return (response, metadata)
+                }
+
+                if request.url?.absoluteString == "http://localhost:8080/register" {
+                    await events.record("registration")
+
+                    let response = HTTPURLResponse(url: request.url!, statusCode: 400, httpVersion: "HTTP/1.1", headerFields: nil)!
+                    return (response, Data("registration failed".utf8))
+                }
+
+                throw OAuthMockURLProtocolError.invalidURL
+            }
+
+            let initializeRequest = #"{"jsonrpc":"2.0","method":"initialize","id":1}"#.data(using: .utf8)!
+
+            do {
+                try await transport.send(initializeRequest)
+                Issue.record("Expected dynamic registration failure")
+            } catch let error as MCPError {
+                switch error {
+                case let .internalError(message):
+                    #expect(message?.contains("Registration failed") == true)
+                default:
+                    Issue.record("Expected internalError, got \(error)")
+                }
+            } catch {
+                Issue.record("Expected MCPError, got \(error)")
+            }
+
+            #expect(await events.snapshot() == [
+                "request-401",
+                "protected-resource",
+                "auth-discovery",
+                "resolver",
+                "registration",
+            ])
         }
     }
 
