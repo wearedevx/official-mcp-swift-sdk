@@ -14,6 +14,12 @@ public actor StreamableHTTPTransport: Transport {
     private var session: URLSession
     private var listenerSession: URLSession
     private var isConnected = false
+    /// Tracks whether `disconnect()` has been called. Streamable HTTP is
+    /// effectively stateless: `send()` is legitimately invoked before
+    /// `connect()` (e.g. for the initial `initialize` handshake), so we cannot
+    /// gate sends on `isConnected`. Instead we gate them on whether the
+    /// underlying `URLSession` has already been invalidated.
+    private var isDisconnected = false
     private var isListeningForServerEvents = false
 
     private var sendingError: MCPError?
@@ -92,6 +98,7 @@ public actor StreamableHTTPTransport: Transport {
     public func disconnect() async {
         messageContinuation.finish()
         isConnected = false
+        isDisconnected = true
 
         streamingTask?.cancel()
         await streamingTask?.value
@@ -104,14 +111,20 @@ public actor StreamableHTTPTransport: Transport {
     }
 
     public func send(_ data: Data) async throws {
-        // The URLSession is invalidated in `disconnect()`. Creating a task on an
-        // invalidated session raises an uncatchable Objective-C NSException
-        // ("Task created in a session that has been invalidated") which crashes
-        // the process. Refuse to send once disconnected so callers (e.g. the
-        // MCP Client sending a cancellation notification concurrently with a
-        // shutdown) get a Swift error they can handle.
-        guard isConnected else {
-            throw MCPError.internalError("Transport not connected")
+        // The URLSession is invalidated in `disconnect()`. Creating a task on
+        // an invalidated session raises an uncatchable Objective-C NSException
+        // ("Task created in a session that has been invalidated") which
+        // crashes the process. Refuse to send once the transport has been
+        // disconnected so callers (e.g. the MCP Client sending a cancellation
+        // notification concurrently with a shutdown) get a Swift error they
+        // can handle.
+        //
+        // Note: we intentionally gate on `isDisconnected` rather than
+        // `isConnected`, because Streamable HTTP servers expect the initial
+        // `initialize` request over POST before any streaming connection is
+        // established; the client therefore calls `send` before `connect`.
+        guard !isDisconnected else {
+            throw MCPError.internalError("Transport disconnected")
         }
 
         var request = URLRequest(url: endpoint)
@@ -134,8 +147,8 @@ public actor StreamableHTTPTransport: Transport {
 
         // Re-check after the `requestModifier` suspension: `disconnect()` may
         // have invalidated the session while we were awaiting it.
-        guard isConnected else {
-            throw MCPError.internalError("Transport not connected")
+        guard !isDisconnected else {
+            throw MCPError.internalError("Transport disconnected")
         }
 
         let (stream, response) = try await session.bytes(for: request)
