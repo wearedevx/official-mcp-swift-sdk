@@ -148,6 +148,13 @@ public actor HTTPClientTransport: Actor, Transport {
 
         logger.info("Sending request", metadata: ["url": "\(request.url!.absoluteString)"])
 
+        // Re-check after the `requestModifier` suspension: `disconnect()` may
+        // have invalidated the session while we were awaiting it. Creating a
+        // task on an invalidated URLSession raises an uncatchable NSException.
+        guard isConnected else {
+            throw MCPError.internalError("Transport not connected")
+        }
+
         let (responseData, response) = try await session.data(for: request)
 
         guard let httpResponse = response as? HTTPURLResponse else {

@@ -104,6 +104,16 @@ public actor StreamableHTTPTransport: Transport {
     }
 
     public func send(_ data: Data) async throws {
+        // The URLSession is invalidated in `disconnect()`. Creating a task on an
+        // invalidated session raises an uncatchable Objective-C NSException
+        // ("Task created in a session that has been invalidated") which crashes
+        // the process. Refuse to send once disconnected so callers (e.g. the
+        // MCP Client sending a cancellation notification concurrently with a
+        // shutdown) get a Swift error they can handle.
+        guard isConnected else {
+            throw MCPError.internalError("Transport not connected")
+        }
+
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
         request.addValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
@@ -121,6 +131,12 @@ public actor StreamableHTTPTransport: Transport {
         }
 
         logger.info("Sending request", metadata: ["url": "\(request.url!.absoluteString)"])
+
+        // Re-check after the `requestModifier` suspension: `disconnect()` may
+        // have invalidated the session while we were awaiting it.
+        guard isConnected else {
+            throw MCPError.internalError("Transport not connected")
+        }
 
         let (stream, response) = try await session.bytes(for: request)
 
