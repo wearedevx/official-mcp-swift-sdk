@@ -128,6 +128,18 @@ import Testing
         case invalidURL
     }
 
+    actor RequestCounter {
+        private var count = 0
+
+        func increment() {
+            count += 1
+        }
+
+        func value() -> Int {
+            count
+        }
+    }
+
     // MARK: -
 
     @Suite("HTTP Client Transport Tests", .serialized)
@@ -412,6 +424,125 @@ import Testing
                 let receivedData = try await iterator.next()
 
                 #expect(receivedData == expectedData)
+                await transport.disconnect()
+            }
+
+            @Test("SSE HTTP 500 fails without retrying", .httpClientTransportSetup)
+            func testSSEHTTP500FailsWithoutRetrying() async throws {
+                let configuration = URLSessionConfiguration.ephemeral
+                configuration.protocolClasses = [MockURLProtocol.self]
+
+                let attempts = RequestCounter()
+                await MockURLProtocol.requestHandlerStorage.setHandler {
+                    [testEndpoint] (request: URLRequest) in
+                    await attempts.increment()
+                    #expect(request.httpMethod == "GET")
+
+                    let response = HTTPURLResponse(
+                        url: testEndpoint, statusCode: 500, httpVersion: "HTTP/1.1",
+                        headerFields: nil)!
+                    return (response, Data("Server Error".utf8))
+                }
+
+                let session = URLSession(configuration: configuration)
+                let transport = HTTPClientTransport(
+                    endpoint: testEndpoint,
+                    session: session,
+                    streaming: true,
+                    logger: nil,
+                    retryPolicy: .init(maxAttempts: 2, initialDelay: 0, maxDelay: 0)
+                )
+
+                do {
+                    try await transport.connect()
+                    Issue.record("Expected SSE connect to fail for HTTP 500")
+                } catch let error as MCPError {
+                    #expect(await attempts.value() == 1)
+                    guard case .internalError(let message) = error else {
+                        Issue.record("Expected MCPError.internalError, got \(error)")
+                        return
+                    }
+                    #expect(message?.contains("HTTP error: 500") ?? false)
+                }
+            }
+
+            @Test("SSE retryable HTTP errors stop at retry limit", .httpClientTransportSetup)
+            func testSSERetryableHTTPErrorsStopAtRetryLimit() async throws {
+                let configuration = URLSessionConfiguration.ephemeral
+                configuration.protocolClasses = [MockURLProtocol.self]
+
+                let attempts = RequestCounter()
+                await MockURLProtocol.requestHandlerStorage.setHandler {
+                    [testEndpoint] (request: URLRequest) in
+                    await attempts.increment()
+                    #expect(request.httpMethod == "GET")
+
+                    let response = HTTPURLResponse(
+                        url: testEndpoint, statusCode: 503, httpVersion: "HTTP/1.1",
+                        headerFields: ["Retry-After": "10"])!
+                    return (response, Data("Service Unavailable".utf8))
+                }
+
+                let session = URLSession(configuration: configuration)
+                let transport = HTTPClientTransport(
+                    endpoint: testEndpoint,
+                    session: session,
+                    streaming: true,
+                    logger: nil,
+                    retryPolicy: .init(maxAttempts: 2, initialDelay: 0, maxDelay: 0)
+                )
+
+                do {
+                    try await transport.connect()
+                    Issue.record("Expected SSE connect to fail after retry limit")
+                } catch let error as MCPError {
+                    #expect(await attempts.value() == 3)
+                    guard case .internalError(let message) = error else {
+                        Issue.record("Expected MCPError.internalError, got \(error)")
+                        return
+                    }
+                    #expect(message?.contains("SSE connection failed after 2 retries") ?? false)
+                }
+            }
+
+            @Test("SSE 401 preserves WWW-Authenticate header", .httpClientTransportSetup)
+            func testSSE401PreservesWWWAuthenticateHeader() async throws {
+                let configuration = URLSessionConfiguration.ephemeral
+                configuration.protocolClasses = [MockURLProtocol.self]
+
+                let header = "Bearer realm=\"test\""
+                let attempts = RequestCounter()
+                await MockURLProtocol.requestHandlerStorage.setHandler {
+                    [testEndpoint] (request: URLRequest) in
+                    await attempts.increment()
+                    #expect(request.httpMethod == "GET")
+
+                    let response = HTTPURLResponse(
+                        url: testEndpoint, statusCode: 401, httpVersion: "HTTP/1.1",
+                        headerFields: ["WWW-Authenticate": header])!
+                    return (response, Data())
+                }
+
+                let session = URLSession(configuration: configuration)
+                let transport = HTTPClientTransport(
+                    endpoint: testEndpoint,
+                    session: session,
+                    streaming: true,
+                    logger: nil,
+                    retryPolicy: .init(maxAttempts: 2, initialDelay: 0, maxDelay: 0)
+                )
+
+                do {
+                    try await transport.connect()
+                    Issue.record("Expected SSE connect to fail for HTTP 401")
+                } catch let error as MCPError {
+                    #expect(await attempts.value() == 1)
+                    guard case .unauthorized(let wwwAuthenticateHeader) = error else {
+                        Issue.record("Expected MCPError.unauthorized, got \(error)")
+                        return
+                    }
+                    #expect(wwwAuthenticateHeader == header)
+                }
             }
         #endif  // !canImport(FoundationNetworking)
     }
