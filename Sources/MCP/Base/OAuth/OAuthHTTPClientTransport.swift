@@ -38,6 +38,12 @@ public actor OAuthHTTPClientTransport: Transport {
     /// Whether the transport has been explicitly connected
     private var isConnected = false
 
+    /// Whether the transport has been explicitly disconnected
+    private var isDisconnected = false
+
+    /// Incremented whenever the wrapped base transport is replaced.
+    private var baseTransportGeneration = 0
+
     /// Client name for dynamic registration
     private let clientName: String?
 
@@ -223,15 +229,13 @@ public actor OAuthHTTPClientTransport: Transport {
         // Create a new authenticated session
         let authenticatedSession = URLSession(configuration: config)
 
-        // Clear existing stream so next receive() gets a fresh one
-        currentStream = nil
-
         // Re-create the request modifiers to use the authenticator for token refreshment
         // We capture the authenticator and identifier to allow dynamic token retrieval
         let authenticator = self.authenticator
         let tokenIdentifier = self.tokenIdentifier
 
         if streamableHTTP {
+            baseTransportGeneration += 1
             baseTransport = StreamableHTTPTransport(
                 endpoint: endpoint,
                 session: authenticatedSession,
@@ -250,6 +254,7 @@ public actor OAuthHTTPClientTransport: Transport {
             )
         } else {
             // Create new transport with authenticated session
+            baseTransportGeneration += 1
             baseTransport = HTTPClientTransport(
                 endpoint: endpoint,
                 session: authenticatedSession,
@@ -275,6 +280,7 @@ public actor OAuthHTTPClientTransport: Transport {
     /// Establishes connection with OAuth authentication for MCP
     public func connect() async throws {
         logger.info("Connecting OAuth HTTP transport to MCP server")
+        isDisconnected = false
 
         // Try to get existing valid token first
         do {
@@ -287,18 +293,21 @@ public actor OAuthHTTPClientTransport: Transport {
         } catch OAuthAuthenticator.OAuthError.authenticationRequired {
             logger.info("No valid token found, will attempt MCP OAuth discovery on first request")
 
-            // Disconnect the old transport before replacing it
-            await baseTransport.disconnect()
-
             // For MCP, we'll discover OAuth requirements when we get a 401 response
             // Create an unauthenticated transport for the initial discovery request
             // Do NOT connect yet - wait for explicit connect() call
+            let oldTransport = baseTransport
+            baseTransportGeneration += 1
             baseTransport = HTTPClientTransport(
                 endpoint: endpoint,
                 session: URLSession(configuration: sessionConfiguration),
                 streaming: streaming,
                 logger: logger
             )
+
+            // Disconnect the old transport after replacement so active OAuth receive streams
+            // observe the new base transport instead of a terminal EOF.
+            await oldTransport.disconnect()
 
             logger.info("OAuth HTTP transport ready, awaiting OAuth discovery")
         } catch {
@@ -310,12 +319,21 @@ public actor OAuthHTTPClientTransport: Transport {
     public func disconnect() async {
         logger.info("Disconnecting OAuth HTTP transport")
 
+        isConnected = false
+        isDisconnected = true
+        baseTransportGeneration += 1
+        currentStream = nil
+
         // Disconnect the base transport
         await baseTransport.disconnect()
     }
 
     /// Sends data with automatic OAuth token injection, refresh, and MCP discovery
     public func send(_ data: Data) async throws {
+        guard !isDisconnected else {
+            throw MCPError.internalError("Transport disconnected")
+        }
+
         // Try to send with current token (or no token for initial discovery)
         do {
             try await baseTransport.send(data)
@@ -348,19 +366,69 @@ public actor OAuthHTTPClientTransport: Transport {
 
         currentStream = AsyncThrowingStream { continuation in
             Task {
-                do {
-                    // Delegate to base transport - SSE will have OAuth headers via URLSession configuration
-                    for try await data in await baseTransport.receive() {
-                        continuation.yield(data)
-                    }
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
+                await self.forwardBaseTransportMessages(to: continuation)
             }
         }
 
         return currentStream!
+    }
+
+    private func forwardBaseTransportMessages(
+        to continuation: AsyncThrowingStream<Data, Swift.Error>.Continuation
+    ) async {
+        while !Task.isCancelled {
+            if isDisconnected {
+                currentStream = nil
+                continuation.finish()
+                return
+            }
+
+            let generation = baseTransportGeneration
+            let stream = await baseTransport.receive()
+
+            do {
+                for try await data in stream {
+                    if Task.isCancelled || isDisconnected {
+                        currentStream = nil
+                        continuation.finish()
+                        return
+                    }
+
+                    continuation.yield(data)
+                }
+
+                if isDisconnected {
+                    currentStream = nil
+                    continuation.finish()
+                    return
+                }
+
+                if generation != baseTransportGeneration {
+                    continue
+                }
+
+                currentStream = nil
+                continuation.finish()
+                return
+            } catch {
+                if isDisconnected {
+                    currentStream = nil
+                    continuation.finish()
+                    return
+                }
+
+                if generation != baseTransportGeneration {
+                    continue
+                }
+
+                currentStream = nil
+                continuation.finish(throwing: error)
+                return
+            }
+        }
+
+        currentStream = nil
+        continuation.finish()
     }
 
     // MARK: - Private Methods
@@ -695,11 +763,14 @@ public actor OAuthHTTPClientTransport: Transport {
     }
 
     private func updateTransportWithToken(_ token: OAuthToken) async throws {
-        // Disconnect old transport
-        await baseTransport.disconnect()
+        let oldTransport = baseTransport
 
         // Update transport with new token
         updateBaseTransport(with: token)
+
+        // Disconnect the old transport after replacement so active OAuth receive streams
+        // move to the new base transport instead of finishing the public OAuth stream.
+        await oldTransport.disconnect()
 
         // Only reconnect if we're in connected state
         if isConnected {

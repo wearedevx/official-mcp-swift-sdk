@@ -1,10 +1,123 @@
 import Foundation
+import Logging
 import Testing
 
 @testable import MCP
 
 @Suite("Client Tests")
 struct ClientTests {
+    actor ImmediateFinishedReceiveTransport: Transport {
+        var logger = Logger(label: "mcp.test.immediate-finished-transport")
+        private(set) var receiveCallCount = 0
+        private(set) var sentData: [Data] = []
+        var isConnected = false
+
+        func connect() async throws {
+            isConnected = true
+        }
+
+        func disconnect() async {
+            isConnected = false
+        }
+
+        func send(_ data: Data) async throws {
+            sentData.append(data)
+        }
+
+        func receive() -> AsyncThrowingStream<Data, Swift.Error> {
+            receiveCallCount += 1
+            return AsyncThrowingStream { continuation in
+                continuation.finish()
+            }
+        }
+    }
+
+    actor ExternallyFinishedReceiveTransport: Transport {
+        var logger = Logger(label: "mcp.test.externally-finished-transport")
+        private(set) var receiveCallCount = 0
+        private(set) var sentData: [Data] = []
+        private var receiveContinuation: AsyncThrowingStream<Data, Swift.Error>.Continuation?
+        var isConnected = false
+
+        func connect() async throws {
+            isConnected = true
+        }
+
+        func disconnect() async {
+            isConnected = false
+            receiveContinuation?.finish()
+            receiveContinuation = nil
+        }
+
+        func send(_ data: Data) async throws {
+            sentData.append(data)
+        }
+
+        func receive() -> AsyncThrowingStream<Data, Swift.Error> {
+            receiveCallCount += 1
+            return AsyncThrowingStream { continuation in
+                receiveContinuation = continuation
+            }
+        }
+
+        func finishReceive() {
+            receiveContinuation?.finish()
+            receiveContinuation = nil
+        }
+    }
+
+    @Test("Finished receive stream does not spin")
+    func testFinishedReceiveStreamDoesNotSpin() async throws {
+        let transport = ImmediateFinishedReceiveTransport()
+        let client = Client(name: "TestClient", version: "1.0")
+
+        await client.updateTransport(newTransport: transport)
+        try await client.connect()
+
+        try await Task.sleep(for: .milliseconds(50))
+
+        #expect(await transport.receiveCallCount == 1)
+
+        await client.disconnect()
+    }
+
+    @Test("Pending request fails when receive stream ends")
+    func testPendingRequestFailsWhenReceiveStreamEnds() async throws {
+        let transport = ExternallyFinishedReceiveTransport()
+        let client = Client(name: "TestClient", version: "1.0")
+
+        await client.updateTransport(newTransport: transport)
+        try await client.connect()
+
+        let pingTask = Task {
+            try await client.ping()
+        }
+
+        for _ in 0..<50 {
+            if await !transport.sentData.isEmpty { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(await transport.sentData.count == 1)
+
+        await transport.finishReceive()
+
+        do {
+            try await pingTask.value
+            Issue.record("Expected pending ping to fail when receive stream ended")
+        } catch let error as MCPError {
+            if case .internalError = error {
+                #expect(Bool(true))
+            } else {
+                Issue.record("Expected internalError, got \(error)")
+            }
+        } catch {
+            Issue.record("Expected MCPError, got \(error)")
+        }
+
+        await client.disconnect()
+    }
+
     @Test("Client connect and disconnect")
     func testClientConnectAndDisconnect() async throws {
         let transport = MockTransport()

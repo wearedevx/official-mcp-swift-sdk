@@ -258,6 +258,112 @@ import Testing
             // Reaching this point confirms send() completed without an SSE connection attempt.
         }
 
+        @Test(
+            "Receive stream survives OAuth transport replacement",
+            .oauthHttpClientTransportSetup,
+            .timeLimit(.minutes(1))
+        )
+        func testReceiveStreamSurvivesOAuthTransportReplacement() async throws {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [OAuthMockURLProtocol.self]
+
+            let oauthConfig = try OAuthConfiguration(
+                authorizationEndpoint: tokenEndpoint,
+                tokenEndpoint: tokenEndpoint,
+                clientId: "test-client",
+                clientSecret: "test-secret",
+                redirectURIResolver: nil
+            )
+
+            let transport = OAuthHTTPClientTransport(
+                endpoint: testEndpoint,
+                oauthConfig: oauthConfig,
+                tokenStorage: InMemoryTokenStorage(),
+                configuration: configuration,
+                streaming: true,
+                logger: nil
+            )
+
+            let stream = await transport.receive()
+            var iterator = stream.makeAsyncIterator()
+
+            let initializeRequest = #"{"jsonrpc":"2.0","method":"initialize","id":1}"#.data(using: .utf8)!
+            let authenticatedResponse = #"{"jsonrpc":"2.0","result":{"ok":true},"id":1}"#.data(using: .utf8)!
+
+            await OAuthMockURLProtocol.setHandler { request in
+                if request.url == testEndpoint,
+                   request.httpMethod == "POST",
+                   request.value(forHTTPHeaderField: "Authorization") == "Bearer new-access-token"
+                {
+                    let response = HTTPURLResponse(
+                        url: testEndpoint,
+                        statusCode: 200,
+                        httpVersion: "HTTP/1.1",
+                        headerFields: ["Content-Type": "application/json"]
+                    )!
+                    return (response, authenticatedResponse)
+                }
+
+                if request.url == testEndpoint, request.httpMethod == "POST" {
+                    let response = HTTPURLResponse(
+                        url: testEndpoint,
+                        statusCode: 401,
+                        httpVersion: "HTTP/1.1",
+                        headerFields: [
+                            "WWW-Authenticate": "Bearer realm=\"test\", resource_metadata=\"http://localhost:8080/.well-known/oauth-protected-resource\""
+                        ]
+                    )!
+                    return (response, Data())
+                }
+
+                if request.url?.absoluteString == "http://localhost:8080/.well-known/oauth-protected-resource" {
+                    let metadata = """
+                    {
+                        "authorization_servers": ["http://localhost:8080"],
+                        "resource": "http://localhost:8080/mcp"
+                    }
+                    """.data(using: .utf8)!
+                    let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+                    return (response, metadata)
+                }
+
+                if request.url?.absoluteString == "http://localhost:8080/.well-known/oauth-authorization-server" {
+                    let metadata = """
+                    {
+                        "issuer": "http://localhost:8080",
+                        "authorization_endpoint": "http://localhost:8080/authorize",
+                        "token_endpoint": "http://localhost:8080/token",
+                        "response_types_supported": ["code"],
+                        "code_challenge_methods_supported": ["S256"]
+                    }
+                    """.data(using: .utf8)!
+                    let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+                    return (response, metadata)
+                }
+
+                if request.url == tokenEndpoint {
+                    let tokenResponse = """
+                    {
+                        "access_token": "new-access-token",
+                        "token_type": "Bearer",
+                        "expires_in": 3600
+                    }
+                    """.data(using: .utf8)!
+                    let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+                    return (response, tokenResponse)
+                }
+
+                throw OAuthMockURLProtocolError.invalidURL
+            }
+
+            try await transport.send(initializeRequest)
+
+            let received = try await iterator.next()
+            #expect(received == authenticatedResponse)
+
+            await transport.disconnect()
+        }
+
         @Test("Dynamic discovery resolves redirect URI only when interactive auth begins", .oauthHttpClientTransportSetup)
         func testDynamicDiscoveryResolvesRedirectURILazily() async throws {
             let configuration = URLSessionConfiguration.ephemeral

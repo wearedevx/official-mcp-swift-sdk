@@ -120,6 +120,8 @@ public actor Client {
     private var notificationHandlers: [String: [NotificationHandlerBox]] = [:]
     /// The task for the message handling loop
     private var task: Task<Void, Never>?
+    private var listenerGeneration = 0
+    private var isDisconnecting = false
 
     /// An error indicating a type mismatch when decoding a pending request
     private struct TypeMismatchError: Swift.Error {}
@@ -203,6 +205,7 @@ public actor Client {
 
     /// Connect to the server using the given transport
     public func connect() async throws {
+        isDisconnecting = false
         try await connection?.connect()
         listenForMessages()
 
@@ -214,10 +217,22 @@ public actor Client {
     public func listenForMessages() {
         guard task == nil else { return }
 
+        listenerGeneration += 1
+        let generation = listenerGeneration
+
         // Start message handling loop
         task = Task {
+            var terminationError: Swift.Error?
+            defer {
+                listenerDidTerminate(
+                    generation: generation,
+                    error: terminationError,
+                    wasCancelled: Task.isCancelled
+                )
+            }
+
             guard let connection = self.connection else { return }
-            repeat {
+            while !Task.isCancelled {
                 // Check for cancellation before starting the iteration
                 if Task.isCancelled { break }
 
@@ -267,26 +282,52 @@ public actor Client {
                             metadata: metadata
                         )
                     }
+
+                    terminationError = MCPError.internalError("Transport receive stream ended")
+                    break
                 } catch let error where MCPError.isResourceTemporarilyUnavailable(error) {
                     try? await Task.sleep(for: .milliseconds(10))
                     continue
                 } catch {
+                    terminationError = error
                     await logger?.error(
                         "Error in message handling loop", metadata: ["error": "\(error)"]
                     )
                     break
                 }
-            } while true
+            }
+        }
+    }
+
+    private func listenerDidTerminate(
+        generation: Int,
+        error: Swift.Error?,
+        wasCancelled: Bool
+    ) {
+        guard generation == listenerGeneration else { return }
+
+        task = nil
+
+        guard !wasCancelled, !isDisconnecting, let error else { return }
+        failPendingRequests(throwing: error)
+    }
+
+    private func failPendingRequests(throwing error: Swift.Error) {
+        let requests = pendingRequests
+        pendingRequests.removeAll()
+
+        for (_, request) in requests {
+            request.resume(throwing: error)
         }
     }
 
     /// Disconnect the client and cancel all pending requests
     public func disconnect() async {
+        isDisconnecting = true
+        listenerGeneration += 1
+
         // Cancel all pending requests
-        for (id, request) in pendingRequests {
-            request.resume(throwing: MCPError.internalError("Client disconnected"))
-            pendingRequests.removeValue(forKey: id)
-        }
+        failPendingRequests(throwing: MCPError.internalError("Client disconnected"))
 
         task?.cancel()
         task = nil
